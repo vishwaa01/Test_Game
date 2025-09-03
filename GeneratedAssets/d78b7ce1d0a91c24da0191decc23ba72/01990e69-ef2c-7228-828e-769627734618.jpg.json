@@ -1,0 +1,20 @@
+{
+    "asset": "d78b7ce1d0a91c24da0191decc23ba72",
+    "fileName": "01990e69-ef2c-7228-828e-769627734618.jpg",
+    "prompt": "car png",
+    "negativePrompt": "",
+    "model": "94c4260f-b988-40e7-b3d3-435b9f449bd0",
+    "modelName": "Flux.1 Dev",
+    "customSeed": -1,
+    "w3CTraceId": "5f60f1912d552521a0267ca53fa99173",
+    "refinementMode": "Generation",
+    "pixelateTargetSize": 0,
+    "pixelateKeepImageSize": false,
+    "pixelatePixelBlockSize": 0,
+    "pixelateMode": 0,
+    "pixelateOutlineThickness": 0,
+    "doodles": {
+        "m_Items": []
+    },
+    "upscaleFactor": 0
+}

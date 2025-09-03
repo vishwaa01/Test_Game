@@ -1,0 +1,13 @@
+{
+    "asset": "8ac006187134c3f4d9d7bb4d58c942f1",
+    "fileName": "01990e86-9e5e-769d-a4d1-5412924d56b5.wav",
+    "prompt": "Realistic sound of a car skidding on asphalt",
+    "negativePrompt": "",
+    "model": "0ee39b33-2893-4e0f-8c46-0e0bdd4eda85",
+    "modelName": "Text to Sound",
+    "customSeed": -1,
+    "w3CTraceId": "f2b005361bf6d02b97cbf72cf45080c8",
+    "duration": 10.0,
+    "autoTrim": false,
+    "hasReference": false
+}
