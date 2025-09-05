@@ -1826,7 +1826,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 024da645c868c434f92abef8d6f8c9b5, type: 3}
       propertyPath: m_LocalPosition.y
-      value: 0.1
+      value: 0.03
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 024da645c868c434f92abef8d6f8c9b5, type: 3}
       propertyPath: m_LocalPosition.z
@@ -9820,10 +9820,10 @@ MonoBehaviour:
   hoodAnchor: {fileID: 6082577731147677142}
   mode: 0
   alignYawToTargetInChase: 1
-  allowInputInChase: 1
-  distance: 6
+  allowInputInChase: 0
+  distance: 12
   minDistance: 1.6
-  height: 20
+  height: 8
   positionSmoothTime: 0.05
   rotationLerpSpeed: 12
   yawSensitivity: 120
@@ -9840,6 +9840,7 @@ MonoBehaviour:
   fovMaxAdd: 20
   fovSpeedFactor: 0.5
   fovSmoothTime: 0.2
+  cameraZOffset: -10
 --- !u!1001 &1676631771
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -12833,21 +12834,26 @@ MonoBehaviour:
   skidTrails:
   - {fileID: 7672367649375116568}
   - {fileID: 1461194769813044993}
-  skidThreshold: 0.3
+  skidThreshold: 0.25
+  smokeEmissionRate: 120
   rearWheelDrive: 1
   frontWheelDrive: 0
-  maxMotorTorque: 1200
+  maxMotorTorque: 6000
   maxBrakeTorque: 4000
-  maxSteerAngle: 30
-  steerSpeed: 5
+  reverseTorqueMultiplier: 0.2
+  maxSteerAngle: 38
+  steerSpeed: 12
+  steeringSensitivity: 1.2
+  steeringReductionAtTopSpeed: 0.45
+  steeringResponseCurve: 1.05
   centerOfMassOffset: {x: 0, y: -0.5, z: -0.25}
   antiRoll: 5000
   downforce: 50
-  topSpeedKph: 180
+  topSpeedKph: 220
   motorTorqueCurve: 1
   enableTractionControl: 1
-  slipLimit: 0.3
-  tractionControlStrength: 0.5
+  slipLimit: 0.25
+  tractionControlStrength: 0.6
   enableStabilityControl: 1
   stabilityStrength: 0.9
   useVirtualJoystick: 0
@@ -12856,6 +12862,7 @@ MonoBehaviour:
   cameraTransform: {fileID: 1675209675}
   joystickDeadzone: 0.15
   autoBrakeForce: 3000
+  brakeLerpSpeed: 8
 --- !u!54 &4134718101983706380
 Rigidbody:
   m_ObjectHideFlags: 0
@@ -12864,7 +12871,7 @@ Rigidbody:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 7402033452660558237}
   serializedVersion: 5
-  m_Mass: 1200
+  m_Mass: 1250
   m_LinearDamping: 0
   m_AngularDamping: 0.05
   m_CenterOfMass: {x: 0, y: 0, z: 0}
@@ -22774,6 +22781,7 @@ GameObject:
   - component: {fileID: 6082577731147677142}
   - component: {fileID: 4134718101983706380}
   - component: {fileID: 4101531278962339288}
+  - component: {fileID: 7402033452660558238}
   m_Layer: 0
   m_Name: race-future
   m_TagString: Untagged
@@ -22781,6 +22789,42 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
+--- !u!114 &7402033452660558238
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7402033452660558237}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c52016a06b9028a4d918a03a480ec639, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::ArcadeCarController
+  maxSpeed: 30
+  maxReverseSpeed: 15
+  acceleration: 45
+  brakeAcceleration: 60
+  baseSteerRate: 120
+  steerResponsiveness: 8
+  highSpeedSteerFactor: 0.5
+  lateralGrip: 6
+  driftGripMultiplier: 0.35
+  downforcePerSpeed: 0.6
+  gravityMultiplier: 1.2
+  groundDrag: 0.4
+  airDrag: 0.05
+  angularDrag: 2
+  groundRayLength: 1.5
+  groundMask:
+    serializedVersion: 2
+    m_Bits: 1
+  groundTiltLerp: 10
+  wheelFL: {fileID: 7039013403879224382}
+  wheelFR: {fileID: 4458849136710769662}
+  wheelRL: {fileID: 4786802790642933940}
+  wheelRR: {fileID: 8292224802694191575}
+  wheelRadius: 0.35
 --- !u!1 &7569936781925924123
 GameObject:
   m_ObjectHideFlags: 0

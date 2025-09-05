@@ -52,6 +52,9 @@ public class CarCameraController : MonoBehaviour
     public float fovSpeedFactor = 0.5f;      // FOV added per m/s
     public float fovSmoothTime = 0.2f;
 
+    [Header("Custom Offset")]
+    public float cameraZOffset = 0f; // <-- New offset variable
+
     // Internals
     Camera cam;
     float yaw, pitch;
@@ -67,7 +70,7 @@ public class CarCameraController : MonoBehaviour
         {
             var e = target.rotation.eulerAngles;
             yaw = e.y;
-            pitch = Mathf.Clamp(10f, pitchLimits.x, pitchLimits.y);
+            pitch = Mathf.Clamp(50f, pitchLimits.x, pitchLimits.y);
             lastTargetPos = target.position;
         }
         if (cam != null) cam.fieldOfView = baseFOV;
@@ -127,7 +130,7 @@ public class CarCameraController : MonoBehaviour
         {
             // Use orbit angles to position the boom.
             Quaternion orbitRot = Quaternion.Euler(pitch, yaw, 0f);
-            Vector3 boom = orbitRot * new Vector3(0f, 0f, -distance);
+            Vector3 boom = orbitRot * new Vector3(0f, 0f, -distance + cameraZOffset); // <-- Apply offset here
             desiredPos = focus + boom;
 
             // Aim at the focus with look-ahead.
