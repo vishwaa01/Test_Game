@@ -1,161 +1,164 @@
+// CarCameraController.cs
+// Features:
+// - Modes: Chase, Orbit, Hood
+// - Smooth position/rotation (LateUpdate) with SmoothDamp/Slerp
+// - Obstruction handling via Physics.SphereCast
+// - Speed-based FOV and velocity look-ahead
+// - Tunable clamps and sensitivities
+
 using UnityEngine;
 
-/// <summary>
-/// Smooth third-person chase camera designed for arcade car games.
-/// Features:
-/// - Smooth position & rotation damping
-/// - Velocity-based look-ahead (anticipates where the car is going)
-/// - Obstruction avoidance using SphereCast (prevents clipping into environment)
-/// - Dynamic FOV based on speed (gives sensation of speed)
-/// - Simple camera shake API for collisions/nitro
-///
-/// Attach to your Scene Camera object and assign the `target` to your car's body or a dedicated camera pivot.
-/// </summary>
+[RequireComponent(typeof(Camera))]
 public class CarCameraController : MonoBehaviour
 {
-    [Header("Target")]
-    public Transform target;                   // Car transform or a pivot point on the car (recommended)
-    public Rigidbody targetRigidbody;          // optional: used for speed/lookahead if assigned
+    public enum CameraMode { Chase, Orbit, Hood }
+
+    [Header("Targets")]
+    public Transform target;                 // Car root
+    public Rigidbody targetRigidbody;        // Optional for velocity-based features
+    public Transform hoodAnchor;             // Optional anchor for hood/first-person
+
+    [Header("Mode")]
+    public CameraMode mode = CameraMode.Chase;
+    public bool alignYawToTargetInChase = true;  // Align yaw to car in Chase
+    public bool allowInputInChase = true;        // Add manual orbit offset while in Chase
 
     [Header("Positioning")]
-    public Vector3 targetOffset = new Vector3(0f, 1.2f, 0f); // where the camera looks relative to target
-    public float distance = 6f;               // base distance behind the car
-    public float height = 2f;                 // vertical offset above target position
-    public float minDistance = 1.6f;          // if obstruction forces camera closer, don't go below this
+    public float distance = 6f;
+    public float minDistance = 1.2f;
+    public float height = 1.5f;
 
-    [Header("Damping")]
-    public float positionDamping = 6f;        // smoothness for camera movement
-    public float rotationDamping = 8f;        // smoothness for camera rotation
+    [Header("Smoothing")]
+    public float positionSmoothTime = 0.05f; // Lower = tighter follow
+    public float rotationLerpSpeed = 12f;    // Higher = snappier rotation
+
+    [Header("Orbit/Input")]
+    public float yawSensitivity = 120f;
+    public float pitchSensitivity = 90f;
+    public Vector2 pitchLimits = new Vector2(-20f, 60f); // degrees
+
+    [Header("Collision")]
+    public LayerMask obstructionMask = ~0;
+    public float collisionRadius = 0.3f;
+    public float collisionBuffer = 0.2f;
 
     [Header("Look-Ahead")]
-    public float lookAheadDistance = 2.5f;    // how far ahead (in meters) camera will look based on velocity
-    public float lookAheadSpeedMultiplier = 0.02f; // scales look-ahead by speed (kph -> meters)
-
-    [Header("Collision Avoidance")]
-    public LayerMask obstructionMask = ~0;    // layers to consider as obstacles (default: everything)
-    public float clipSphereRadius = 0.35f;    // sphere radius used for spherecast
+    public float lookAheadFactor = 0.02f;    // Meters of offset per m/s
+    public float lookAheadMaxSpeed = 40f;    // Clamp velocity contribution
 
     [Header("Dynamic FOV")]
-    public float baseFov = 60f;               // default field of view
-    public float maxFov = 75f;                // max FOV at high speed
-    public float fovSpeedKph = 120f;          // speed (kph) at which FOV reaches max
-    public float fovDamping = 3f;             // how quickly FOV interpolates
+    public float baseFOV = 60f;
+    public float fovMaxAdd = 20f;
+    public float fovSpeedFactor = 0.5f;      // FOV added per m/s
+    public float fovSmoothTime = 0.2f;
 
-    [Header("Shake")]
-    public float defaultShakeDuration = 0.45f;
-    public float defaultShakeMagnitude = 0.12f;
-
-    // internal
-    Vector3 currentVelocity = Vector3.zero;
+    // Internals
     Camera cam;
-    Vector3 shakeOffset = Vector3.zero;
+    float yaw, pitch;
+    float yawVel;
+    Vector3 posVel;
+    float fovVel;
+    Vector3 lastTargetPos;
 
     void Awake()
     {
         cam = GetComponent<Camera>();
-        if (cam == null)
+        if (target)
         {
-            Debug.LogWarning("CarCameraController should be attached to a Camera object.", this);
-            cam = Camera.main;
+            var e = target.rotation.eulerAngles;
+            yaw = e.y;
+            pitch = Mathf.Clamp(10f, pitchLimits.x, pitchLimits.y);
+            lastTargetPos = target.position;
         }
+        if (cam != null) cam.fieldOfView = baseFOV;
+    }
 
-        // Try to auto-assign rigidbody if not provided
-        if (target != null && targetRigidbody == null)
+    void Update()
+    {
+        // Gather input each frame for responsiveness.
+        float mx = Input.GetAxisRaw("Mouse X");
+        float my = Input.GetAxisRaw("Mouse Y");
+
+        if (mode == CameraMode.Orbit || (mode == CameraMode.Chase && allowInputInChase))
         {
-            targetRigidbody = target.GetComponentInParent<Rigidbody>();
+            yaw += mx * yawSensitivity * Time.unscaledDeltaTime;
+            pitch -= my * pitchSensitivity * Time.unscaledDeltaTime;
+            pitch = Mathf.Clamp(pitch, pitchLimits.x, pitchLimits.y);
         }
     }
 
     void LateUpdate()
     {
-        if (target == null) return;
+        if (!target) return;
 
-        // Determine look-ahead amount based on car speed (use kph for easier tuning)
-        float speedKph = 0f;
-        if (targetRigidbody != null)
-            speedKph = targetRigidbody.linearVelocity.magnitude * 3.6f;
-
-        float lookAhead = Mathf.Clamp(speedKph * lookAheadSpeedMultiplier, 0f, lookAheadDistance);
-
-        // Desired focus point = target position + offset + forward look-ahead
-        Vector3 focusPoint = target.position + target.TransformDirection(targetOffset) + target.forward * lookAhead;
-
-        // Desired camera position (behind the car at distance, with height)
-        Vector3 desiredPos = target.position + target.TransformDirection(new Vector3(0f, height, -distance + -lookAhead * 0.1f));
-
-        // Avoid obstacles: spherecast from focus point toward desired position
-        Vector3 toCamera = desiredPos - focusPoint;
-        float fullDist = toCamera.magnitude;
-
-        if (fullDist > 0.001f)
+        // Optionally auto-align yaw to target heading in Chase mode.
+        if (mode == CameraMode.Chase && alignYawToTargetInChase)
         {
-            RaycastHit hit;
-            Vector3 dir = toCamera.normalized;
-
-            // SphereCast returns true if an obstacle is between the focus point and desired camera position
-            if (Physics.SphereCast(focusPoint, clipSphereRadius, dir, out hit, fullDist, obstructionMask))
-            {
-                // place camera slightly in front of collision point so it doesn't clip
-                desiredPos = focusPoint + dir * Mathf.Max(hit.distance - clipSphereRadius, minDistance);
-            }
+            float targetYaw = target.rotation.eulerAngles.y;
+            yaw = Mathf.SmoothDampAngle(yaw, targetYaw, ref yawVel, 0.08f);
         }
 
-        // Smoothly move camera toward desired position
-        transform.position = Vector3.SmoothDamp(transform.position, desiredPos + shakeOffset, ref currentVelocity, 1f / Mathf.Max(0.0001f, positionDamping));
-
-        // Smooth rotation: look at focus point
-        Quaternion desiredRot = Quaternion.LookRotation((focusPoint - transform.position).normalized, Vector3.up);
-        transform.rotation = Quaternion.Slerp(transform.rotation, desiredRot, Time.deltaTime * rotationDamping);
-
-        // Dynamic FOV based on speed
-        if (cam != null)
+        // Compute look-ahead from velocity.
+        Vector3 vel = Vector3.zero;
+        if (targetRigidbody)
         {
-            float targetFov = baseFov + (maxFov - baseFov) * Mathf.Clamp01(speedKph / Mathf.Max(1f, fovSpeedKph));
-            cam.fieldOfView = Mathf.Lerp(cam.fieldOfView, targetFov, Time.deltaTime * fovDamping);
+            vel = targetRigidbody.linearVelocity;
         }
-    }
-
-    /// <summary>
-    /// Public API: call to trigger a quick camera shake (collision, explosion, nitro)
-    /// </summary>
-    public void Shake(float magnitude = -1f, float duration = -1f)
-    {
-        float mag = (magnitude <= 0f) ? defaultShakeMagnitude : magnitude;
-        float dur = (duration <= 0f) ? defaultShakeDuration : duration;
-        StopAllCoroutines();
-        StartCoroutine(DoShake(mag, dur));
-    }
-
-    System.Collections.IEnumerator DoShake(float magnitude, float duration)
-    {
-        float elapsed = 0f;
-        while (elapsed < duration)
+        else
         {
-            float x = (Random.value * 2f - 1f) * magnitude;
-            float y = (Random.value * 2f - 1f) * magnitude * 0.6f; // less vertical shake
-            // small forward/backward jitter as well
-            float z = (Random.value * 2f - 1f) * magnitude * 0.08f;
+            // Fallback velocity estimate if no Rigidbody provided.
+            vel = (target.position - lastTargetPos) / Mathf.Max(Time.deltaTime, 1e-6f);
+        }
+        Vector3 lookAhead = Vector3.ClampMagnitude(vel, lookAheadMaxSpeed) * lookAheadFactor;
 
-            shakeOffset = transform.right * x + transform.up * y + transform.forward * z;
-            elapsed += Time.deltaTime;
-            yield return null;
+        // Anchor the camera around a target height.
+        Vector3 focus = target.position + Vector3.up * height;
+
+        // Desired camera pose by mode.
+        Vector3 desiredPos;
+        Quaternion desiredRot;
+
+        if (mode == CameraMode.Hood && hoodAnchor != null)
+        {
+            desiredPos = hoodAnchor.position;
+            desiredRot = Quaternion.LookRotation((focus + lookAhead) - desiredPos, Vector3.up);
+        }
+        else
+        {
+            // Use orbit angles to position the boom.
+            Quaternion orbitRot = Quaternion.Euler(pitch, yaw, 0f);
+            Vector3 boom = orbitRot * new Vector3(0f, 0f, -distance);
+            desiredPos = focus + boom;
+
+            // Aim at the focus with look-ahead.
+            desiredRot = Quaternion.LookRotation((focus + lookAhead) - desiredPos, Vector3.up);
         }
 
-        shakeOffset = Vector3.zero;
-    }
+        // Obstruction handling: sphere cast from focus toward desiredPos.
+        Vector3 toCam = desiredPos - focus;
+        float desiredDist = toCam.magnitude;
+        Vector3 dir = desiredDist > 1e-3f ? toCam / desiredDist : transform.forward;
 
-    // Optional editor helper to center camera to default desired pos quickly
-    #if UNITY_EDITOR
-    [ContextMenu("Snap to Default Position")]
-    void SnapToDefaultPosition()
-    {
-        if (target == null) return;
-        float speedKph = 0f;
-        if (targetRigidbody != null) speedKph = targetRigidbody.linearVelocity.magnitude * 3.6f;
-        float lookAhead = Mathf.Clamp(speedKph * lookAheadSpeedMultiplier, 0f, lookAheadDistance);
-        Vector3 desiredPos = target.position + target.TransformDirection(new Vector3(0f, height, -distance + -lookAhead * 0.1f));
-        transform.position = desiredPos;
-        transform.LookAt(target.position + target.TransformDirection(targetOffset));
+        if (Physics.SphereCast(focus, collisionRadius, dir, out RaycastHit hit, desiredDist, obstructionMask, QueryTriggerInteraction.Ignore))
+        {
+            float blockedDist = Mathf.Max(hit.distance - collisionBuffer, minDistance);
+            desiredPos = focus + dir * blockedDist;
+        }
+
+        // Smooth position.
+        Vector3 newPos = Vector3.SmoothDamp(transform.position, desiredPos, ref posVel, positionSmoothTime);
+
+        // Smooth rotation.
+        Quaternion newRot = Quaternion.Slerp(transform.rotation, desiredRot, 1f - Mathf.Exp(-rotationLerpSpeed * Time.deltaTime));
+
+        // Apply.
+        transform.SetPositionAndRotation(newPos, newRot);
+
+        // Dynamic FOV based on speed.
+        float speed = vel.magnitude;
+        float targetFOV = Mathf.Clamp(baseFOV + speed * fovSpeedFactor, baseFOV, baseFOV + fovMaxAdd);
+        cam.fieldOfView = Mathf.SmoothDamp(cam.fieldOfView, targetFOV, ref fovVel, fovSmoothTime);
+
+        lastTargetPos = target.position;
     }
-    #endif
 }

@@ -9817,24 +9817,29 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::CarCameraController
   target: {fileID: 6082577731147677142}
   targetRigidbody: {fileID: 4134718101983706380}
-  targetOffset: {x: 0, y: 1.2, z: 0}
+  hoodAnchor: {fileID: 6082577731147677142}
+  mode: 0
+  alignYawToTargetInChase: 1
+  allowInputInChase: 1
   distance: 6
-  height: 2
   minDistance: 1.6
-  positionDamping: 6
-  rotationDamping: 8
-  lookAheadDistance: 2.5
-  lookAheadSpeedMultiplier: 0.02
+  height: 20
+  positionSmoothTime: 0.05
+  rotationLerpSpeed: 12
+  yawSensitivity: 120
+  pitchSensitivity: 90
+  pitchLimits: {x: -20, y: 60}
   obstructionMask:
     serializedVersion: 2
     m_Bits: 4294967295
-  clipSphereRadius: 0.35
-  baseFov: 60
-  maxFov: 75
-  fovSpeedKph: 120
-  fovDamping: 3
-  defaultShakeDuration: 0.45
-  defaultShakeMagnitude: 0.12
+  collisionRadius: 0.3
+  collisionBuffer: 0.2
+  lookAheadFactor: 0.02
+  lookAheadMaxSpeed: 40
+  baseFOV: 60
+  fovMaxAdd: 20
+  fovSpeedFactor: 0.5
+  fovSmoothTime: 0.2
 --- !u!1001 &1676631771
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -12822,38 +12827,35 @@ MonoBehaviour:
   - {fileID: 3540354479282203036}
   - {fileID: 4809562567825285519}
   - {fileID: 974128615748124213}
-  maxEngineTorque: 1600
-  maxBrakeTorque: 4200
-  finalDriveRatio: 1
-  rearTorqueFraction: 1
-  maxSpeedKph: 120
-  maxReverseSpeedKph: 30
-  accelerationMultiplier: 3
-  centerOfMassOffset: {x: 0, y: -0.5, z: -0.25}
-  antiRoll: 5000
-  downforce: 50
-  enableTractionControl: 1
-  slipLimit: 0.3
-  tractionControlStrength: 0.5
-  enableStabilityControl: 1
-  stabilityStrength: 0.9
-  maxSteerAngle: 30
-  steeringSpeed: 0.6
   tireSmoke:
   - {fileID: 6373128811562420910}
   - {fileID: 7077921310195219609}
   skidTrails:
   - {fileID: 7672367649375116568}
   - {fileID: 1461194769813044993}
-  skidThreshold: 0.4
-  useVirtualJoystick: 1
+  skidThreshold: 0.3
+  rearWheelDrive: 1
+  frontWheelDrive: 0
+  maxMotorTorque: 1200
+  maxBrakeTorque: 4000
+  maxSteerAngle: 30
+  steerSpeed: 5
+  centerOfMassOffset: {x: 0, y: -0.5, z: -0.25}
+  antiRoll: 5000
+  downforce: 50
+  topSpeedKph: 180
+  motorTorqueCurve: 1
+  enableTractionControl: 1
+  slipLimit: 0.3
+  tractionControlStrength: 0.5
+  enableStabilityControl: 1
+  stabilityStrength: 0.9
+  useVirtualJoystick: 0
   joystickInput: {x: 0, y: 0}
   useJoystickWorldDirection: 1
-  cameraTransform: {fileID: 0}
+  cameraTransform: {fileID: 1675209675}
   joystickDeadzone: 0.15
   autoBrakeForce: 3000
-  creepTorqueFraction: 0.08
-  steerCreepThreshold: 0.15
 --- !u!54 &4134718101983706380
 Rigidbody:
   m_ObjectHideFlags: 0
