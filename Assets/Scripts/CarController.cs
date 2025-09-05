@@ -4,13 +4,9 @@ using UnityEngine;
 public class CarController : MonoBehaviour
 {
     // -----------------------
-    // ARCADE / MOBILE-FRIENDLY CAR CONTROLLER
-    // Based on your Prometeo example - adapted to a WheelCollider array and virtual joystick.
-    // - Mobile joystick support (SetJoystickInput)
-    // - Smooth throttle/steering axes
-    // - Auto-decelerate / auto-stop when joystick released
-    // - Traction & simple stability control
-    // - Rear smoke & skid effects
+    // ARCADE / MOBILE-FRIENDLY CAR CONTROLLER (TORQUE-BASED)
+    // Reworked to use realistic engine/wheel torques and to allow immediate
+    // movement when the player steers from stopped position.
     // -----------------------
 
     [Header("References")]
@@ -18,14 +14,20 @@ public class CarController : MonoBehaviour
     public WheelCollider[] wheelColliders = new WheelCollider[4];
     public Transform[] wheelMeshes = new Transform[4];
 
+    [Header("Engine & Transmission (torque-based)")]
+    [Tooltip("Maximum engine torque in Nm (applied to driven wheels before distribution)")]
+    public float maxEngineTorque = 1600f;   // Nm
+    [Tooltip("Maximum brake torque in Nm applied when braking")]
+    public float maxBrakeTorque = 4200f;    // Nm
+    [Tooltip("Final drive multiplier to simulate gearing (applied to engine torque)")]
+    public float finalDriveRatio = 1.0f;    // simple scalar
+    [Tooltip("Fraction of torque sent to rear wheels (0..1). 1 = pure RWD, 0 = pure FWD")]
+    [Range(0f,1f)] public float rearTorqueFraction = 1f;
+
     [Header("Car - basic values")]
     [Range(20, 220)] public int maxSpeedKph = 120;            // top speed (km/h)
-    [Range(5, 80)] public int maxReverseSpeedKph = 30;        // reverse top speed (km/h)
-    [Range(1, 10)] public int accelerationMultiplier = 3;     // 1..10 - scales applied motor torque
-    [Range(1, 10)] public int decelerationMultiplier = 3;     // how fast car slows when joystick released
-    [Range(10, 45)] public int maxSteerAngle = 30;           // degrees
-    [Range(0.1f, 5f)] public float steeringSpeed = 0.6f;     // steering Lerp speed
-    [Range(100, 6000)] public int brakeForce = 1500;         // brake torque
+    [Range(10, 120)] public int maxReverseSpeedKph = 30;      // reverse top speed (km/h)
+    [Range(1, 10)] public float accelerationMultiplier = 3f;  // scale for torque application
 
     [Header("Stability & feel")]
     public Vector3 centerOfMassOffset = new Vector3(0, -0.6f, 0);
@@ -39,53 +41,51 @@ public class CarController : MonoBehaviour
     [Range(0f, 1f)] public float tractionControlStrength = 0.5f;
 
     public bool enableStabilityControl = true;
-    [Tooltip("How strongly the script corrects yaw when sliding")]
     [Range(0f, 3f)] public float stabilityStrength = 0.9f;
 
+    [Header("Steering")]
+    [Range(10, 45)] public int maxSteerAngle = 30;
+    [Range(0.05f, 5f)] public float steeringSpeed = 0.6f;
+
     [Header("Effects & Skid")]
-    public ParticleSystem[] tireSmoke = new ParticleSystem[4]; // optional: assign 2 rear particle systems
-    public TrailRenderer[] skidTrails = new TrailRenderer[4];  // optional: assign rear trails
+    public ParticleSystem[] tireSmoke = new ParticleSystem[4];
+    public TrailRenderer[] skidTrails = new TrailRenderer[4];
     public float skidThreshold = 0.4f;
 
     [Header("Mobile / Joystick")]
-    public bool useVirtualJoystick = true; // set false to use Unity Input axes for testing in editor
-    [HideInInspector] public Vector2 joystickInput = Vector2.zero; // set from UI: (-1..1, -1..1)
-    public bool useJoystickWorldDirection = true; // interpret joystick relative to camera
-    public Transform cameraTransform; // required when using world-direction
+    public bool useVirtualJoystick = true;
+    [HideInInspector] public Vector2 joystickInput = Vector2.zero;
+    public bool useJoystickWorldDirection = true;
+    public Transform cameraTransform;
     [Range(0f, 0.4f)] public float joystickDeadzone = 0.15f;
     [Tooltip("Strong braking applied while joystick released to come to a stop")]
     public float autoBrakeForce = 3000f;
+
+    [Header("Creep & Steering from Stop")]
+    [Tooltip("When steering from standstill, apply this small forward torque (fraction of maxEngineTorque)")]
+    [Range(0f, 0.5f)] public float creepTorqueFraction = 0.08f;
+    [Tooltip("Minimum steering magnitude to trigger creep movement when stopped")]
+    public float steerCreepThreshold = 0.15f;
 
     // -----------------------
     // Internal runtime
     // -----------------------
     Rigidbody rb;
-
-    // smooth axes (similar to Prometeo): throttleAxis [-1..1], steeringAxis [-1..1]
-    float throttleAxis = 0f;
-    float steeringAxis = 0f;
-
-    // drifting / skid detection
+    float throttleAxis = 0f; // -1..1
+    float steeringAxis = 0f; // -1..1
     float localVelocityX;
     float localVelocityZ;
     bool isDrifting = false;
     bool isTractionLocked = false;
-
-    // saved friction values so we can change friction for drift if needed (optional)
     WheelFrictionCurve[] originalSideways = new WheelFrictionCurve[4];
-
-    // helper state
     bool deceleratingCar = false;
 
     void Start()
     {
         rb = GetComponent<Rigidbody>();
         rb.centerOfMass += centerOfMassOffset;
+        if (cameraTransform == null && Camera.main != null) cameraTransform = Camera.main.transform;
 
-        if (cameraTransform == null && Camera.main != null)
-            cameraTransform = Camera.main.transform;
-
-        // Cache original sideways friction so RecoverTraction can restore values
         for (int i = 0; i < 4 && i < wheelColliders.Length; i++)
         {
             if (wheelColliders[i] != null)
@@ -95,30 +95,22 @@ public class CarController : MonoBehaviour
 
     void Update()
     {
-        // Read joystick or keyboard/touch controls and update throttleAxis/steeringAxis (smoothly)
         HandleInput();
-
-        // simple visual update for wheel meshes
         UpdateWheelMeshes();
     }
 
     void FixedUpdate()
     {
-        // Update local velocity for skid checks
         localVelocityX = transform.InverseTransformDirection(rb.linearVelocity).x;
         localVelocityZ = transform.InverseTransformDirection(rb.linearVelocity).z;
 
-        // Apply motor & brakes based on throttleAxis
         ApplyMotorAndBrakes();
 
-        // Stability helpers
         DoAntiRoll();
         if (enableStabilityControl) ApplyStabilityControl();
 
-        // Downforce
         rb.AddForce(-transform.up * downforce * rb.linearVelocity.magnitude);
 
-        // Skid effects
         HandleSkids();
     }
 
@@ -137,39 +129,35 @@ public class CarController : MonoBehaviour
 
             if (useJoystickWorldDirection && js != Vector2.zero && cameraTransform != null)
             {
-                // convert joystick to world-space direction relative to camera
                 Vector3 camF = Vector3.ProjectOnPlane(cameraTransform.forward, Vector3.up).normalized;
                 Vector3 camR = Vector3.ProjectOnPlane(cameraTransform.right, Vector3.up).normalized;
                 Vector3 desiredDir = (camF * js.y + camR * js.x).normalized;
-
-                // steering: signed angle between car forward and desiredDir
                 float angleToDesired = Vector3.SignedAngle(transform.forward, desiredDir, Vector3.up);
                 desiredSteer = Mathf.Clamp(angleToDesired / maxSteerAngle, -1f, 1f);
-
-                // throttle: drive forward based on how aligned desiredDir is with car forward
                 float forwardDot = Mathf.Clamp01(Vector3.Dot(transform.forward, desiredDir));
                 desiredThrottle = js.magnitude * (forwardDot > 0.1f ? 1f : 0.35f);
 
-                // If joystick points roughly backwards, use reverse throttle (negative)
                 if (Vector3.Dot(transform.forward, desiredDir) < -0.6f)
-                    desiredThrottle = -js.magnitude; // reverse
+                    desiredThrottle = -js.magnitude;
+
+                // If joystick has steering but no throttle and car almost stopped, cancel deceleration so creep can take over
+                if (Mathf.Abs(js.x) > steerCreepThreshold && Mathf.Abs(js.y) < joystickDeadzone && rb.linearVelocity.magnitude < 0.5f)
+                {
+                    if (deceleratingCar) { deceleratingCar = false; CancelInvoke(nameof(DecelerateCar)); }
+                }
             }
             else
             {
-                // local-style joystick: y = throttle (-1..1), x = steer
                 desiredThrottle = joystickInput.y;
                 desiredSteer = joystickInput.x;
             }
         }
         else
         {
-            // Editor / keyboard fallback
             desiredThrottle = Input.GetAxis("Vertical");
             desiredSteer = Input.GetAxis("Horizontal");
         }
 
-        // Smoothly approach desired axes (gives arcade smoothing like Prometeo)
-        // Throttle smoothing: ramp up/down faster when pressing, slower when releasing
         float accelRamp = 3f * Time.deltaTime;
         float decelRamp = 6.5f * Time.deltaTime;
         if (Mathf.Abs(desiredThrottle) > Mathf.Abs(throttleAxis))
@@ -177,10 +165,8 @@ public class CarController : MonoBehaviour
         else
             throttleAxis = Mathf.MoveTowards(throttleAxis, desiredThrottle, decelRamp);
 
-        // Steering smoothing
         steeringAxis = Mathf.MoveTowards(steeringAxis, desiredSteer, steeringSpeed * Time.deltaTime * 6f);
 
-        // Auto-stop: if joystick released and we are moving, start deceleration coroutine using InvokeRepeating
         bool joystickActive = useVirtualJoystick ? joystickInput.magnitude >= joystickDeadzone : !Mathf.Approximately(desiredThrottle, 0f);
         if (!joystickActive && !deceleratingCar && rb.linearVelocity.magnitude > 0.2f)
         {
@@ -195,14 +181,13 @@ public class CarController : MonoBehaviour
     }
 
     // -----------------------
-    // Motor / braking
+    // Motor / braking (torque-based)
     // -----------------------
     void ApplyMotorAndBrakes()
     {
-        // compute current speed kph
         float speedKph = rb.linearVelocity.magnitude * 3.6f;
 
-        // Apply steering to front wheels
+        // steering applied to front wheels
         float steerAngle = steeringAxis * maxSteerAngle;
         if (wheelColliders.Length >= 2)
         {
@@ -210,65 +195,56 @@ public class CarController : MonoBehaviour
             if (wheelColliders[1] != null) wheelColliders[1].steerAngle = Mathf.Lerp(wheelColliders[1].steerAngle, steerAngle, steeringSpeed * Time.fixedDeltaTime * 60f);
         }
 
-        // Basic brake handling: when throttleAxis ~ 0 and joystick not active, brakes are applied in DecelerateCar.
+        // compute engine torque (Nm) based on throttle
+        float engineTorque = maxEngineTorque * throttleAxis * accelerationMultiplier * finalDriveRatio;
 
-        // Limit torque near top speed
-        float speedFactor = Mathf.Clamp01(1f - (speedKph / Mathf.Max(1f, maxSpeedKph)));
+        // limit torque when above max speed
+        if (Mathf.Abs(speedKph) >= maxSpeedKph && throttleAxis > 0f) engineTorque = 0f;
+        if (Mathf.Abs(speedKph) >= maxReverseSpeedKph && throttleAxis < 0f) engineTorque = 0f;
 
-        // Torque to apply (base)
-        float baseTorque = accelerationMultiplier * 50f; // tuned constant similar to Prometeo
-        float appliedTorque = baseTorque * throttleAxis * Mathf.Pow(speedFactor, 1f);
-
-        // Traction control: reduce torque when wheel forwardSlip too high
-        if (enableTractionControl && Mathf.Abs(appliedTorque) > 0.001f)
+        // If steering input present and car nearly stopped, apply a small creep forward torque so steering causes movement
+        bool applyCreep = (Mathf.Abs(steeringAxis) > steerCreepThreshold && Mathf.Abs(throttleAxis) < 0.05f && rb.linearVelocity.magnitude < 0.5f);
+        float creepTorque = 0f;
+        if (applyCreep)
         {
-            if (wheelColliders != null)
-            {
-                for (int i = 0; i < wheelColliders.Length; i++)
-                {
-                    if (wheelColliders[i] == null) continue;
-                    if ((i == 2 || i == 3)) // rear wheels typically give power in RWD case
-                    {
-                        float t = appliedTorque;
-                        if (enableTractionControl)
-                            t = AdjustForTraction(wheelColliders[i], appliedTorque);
-
-                        wheelColliders[i].motorTorque = t;
-                    }
-                    else
-                    {
-                        // front wheels: set to zero unless frontWheelDrive
-                        if (i < 2 && wheelColliders.Length >= 2)
-                        {
-                            // if front-wheel drive desired, set here (not default)
-                        }
-                    }
-                }
-            }
-        }
-        else
-        {
-            // apply torque directly without TC (or if torque is near zero)
-            for (int i = 0; i < wheelColliders.Length; i++)
-            {
-                if (wheelColliders[i] == null) continue;
-                if (i == 2 || i == 3)
-                    wheelColliders[i].motorTorque = appliedTorque;
-            }
+            creepTorque = maxEngineTorque * creepTorqueFraction * Mathf.Abs(steeringAxis);
+            engineTorque = Mathf.Max(engineTorque, creepTorque);
         }
 
-        // Apply small forward stabilization brake if throttle not pressed and car speed is low
-        if (Mathf.Abs(throttleAxis) < 0.01f && rb.linearVelocity.magnitude > 0.05f)
+        // Distribute torque to wheels according to rearTorqueFraction
+        float rearTorque = engineTorque * rearTorqueFraction * 0.5f; // split between RL & RR
+        float frontTorque = engineTorque * (1f - rearTorqueFraction) * 0.5f; // split between FL & FR
+
+        // Apply traction control per driven wheel
+        for (int i = 0; i < wheelColliders.Length; i++)
         {
-            // keep small brake
-            for (int i = 0; i < wheelColliders.Length; i++) if (wheelColliders[i] != null) wheelColliders[i].brakeTorque = 0f;
+            if (wheelColliders[i] == null) continue;
+
+            float torqueToApply = 0f;
+            if (i == 2 || i == 3) torqueToApply = rearTorque;
+            else torqueToApply = frontTorque;
+
+            // apply traction control
+            if (enableTractionControl && Mathf.Abs(torqueToApply) > 0.001f)
+                torqueToApply = AdjustForTraction(wheelColliders[i], torqueToApply);
+
+            // Set motor torque for driven wheels. Non-driven will get 0.
+            if ((i == 2 || i == 3) && rearTorqueFraction > 0f)
+                wheelColliders[i].motorTorque = torqueToApply;
+            else if ((i == 0 || i == 1) && rearTorqueFraction < 1f)
+                wheelColliders[i].motorTorque = torqueToApply;
+            else
+                wheelColliders[i].motorTorque = 0f;
+
+            // Apply braking when no throttle and decelerating
+            // Brake torque handled in DecelerateCar via brakeTorque assignments
         }
     }
 
-    // Adjust torque for traction based on forward slip
     float AdjustForTraction(WheelCollider wheel, float inputTorque)
     {
         if (!enableTractionControl || wheel == null) return inputTorque;
+
         WheelHit hit;
         if (wheel.GetGroundHit(out hit))
         {
@@ -283,7 +259,6 @@ public class CarController : MonoBehaviour
     // -----------------------
     // Deceleration / Auto-stop
     // -----------------------
-    // Called repeatedly with InvokeRepeating when joystick released
     void DecelerateCar()
     {
         // Gradually reduce throttleAxis
@@ -297,8 +272,7 @@ public class CarController : MonoBehaviour
         }
         else
         {
-            // stop completely
-            rb.linearVelocity = Vector3.zero;
+            // remove brakes and stop decelerating, do NOT zero rigidbody velocity so we remain responsive to next input
             for (int i = 0; i < wheelColliders.Length; i++) if (wheelColliders[i] != null) wheelColliders[i].brakeTorque = 0f;
             CancelInvoke(nameof(DecelerateCar));
             deceleratingCar = false;
@@ -322,13 +296,10 @@ public class CarController : MonoBehaviour
     {
         WheelHit hit;
         float travelL = 1f, travelR = 1f;
-
         bool groundedL = wheelColliders[leftIndex].GetGroundHit(out hit);
         if (groundedL) travelL = (-wheelColliders[leftIndex].transform.InverseTransformPoint(hit.point).y - wheelColliders[leftIndex].radius) / wheelColliders[leftIndex].suspensionDistance;
-
         bool groundedR = wheelColliders[rightIndex].GetGroundHit(out hit);
         if (groundedR) travelR = (-wheelColliders[rightIndex].transform.InverseTransformPoint(hit.point).y - wheelColliders[rightIndex].radius) / wheelColliders[rightIndex].suspensionDistance;
-
         float antiRollForce = (travelL - travelR) * antiRoll;
         if (groundedL) rb.AddForceAtPosition(wheelColliders[leftIndex].transform.up * -antiRollForce, wheelColliders[leftIndex].transform.position);
         if (groundedR) rb.AddForceAtPosition(wheelColliders[rightIndex].transform.up * antiRollForce, wheelColliders[rightIndex].transform.position);
@@ -355,11 +326,7 @@ public class CarController : MonoBehaviour
             {
                 float sidewaysSlip = Mathf.Abs(hit.sidewaysSlip);
                 bool isSkiddingNow = sidewaysSlip > skidThreshold;
-
-                // rear wheels smoke/trail
                 TriggerEffects(i, isSkiddingNow);
-
-                // small flag for other logic
                 if (i == 2 || i == 3) isDrifting = isSkiddingNow;
             }
             else
@@ -400,7 +367,6 @@ public class CarController : MonoBehaviour
     // -----------------------
     // Public API
     // -----------------------
-    // Called from your on-screen joystick script every frame with (-1..1, -1..1)
     public void SetJoystickInput(Vector2 input)
     {
         joystickInput = input;
