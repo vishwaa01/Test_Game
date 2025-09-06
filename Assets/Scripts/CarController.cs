@@ -16,14 +16,12 @@ public class CarController : MonoBehaviour
     [Header("Drive")]
     public bool rearWheelDrive = true;
     public bool frontWheelDrive = false;
-    public float maxMotorTorque = 4500f; // increased so car feels responsive on mobile
-    public float maxBrakeTorque = 5000f;
-    // multiplier applied when reversing to make reverse input more responsive
-    public float reverseTorqueMultiplier = 1.6f;
+    public float maxMotorTorque = 9000f; // engine peak
+    public float maxBrakeTorque = 6000f;
 
-    [Header("Steering")]
+    [Header("Steer")]
     public float maxSteerAngle = 38f;
-    public float steerSpeed = 12f; // used as responsiveness factor (higher = snappier)
+    public float steerResponsiveness = 540f; // degrees per second - high value for immediate feel
     public float steeringSensitivity = 1.2f; // multiplier for joystick world-direction mapping
     public float steeringReductionAtTopSpeed = 0.45f; // how much steering is reduced at top speed
     public float steeringResponseCurve = 1.05f; // >1 = more aggressive near edges
@@ -34,15 +32,29 @@ public class CarController : MonoBehaviour
     public float downforce = 60f;
     public float topSpeedKph = 220f;
 
-    [Header("Tuning")]
-    public float motorTorqueCurve = 1.0f;
+    [Header("Rigidbody (auto-adjust)")]
+    public float recommendedLinearDrag = 0.01f;   // default linear drag for arcade feel
+    public float recommendedAngularDrag = 0.05f;  // default angular drag
+    public bool enforceRigidbodySettings = true;
 
-    [Header("Traction Control")]
+    [Header("Drivetrain Assist")]
+    // Helps the car reach target speeds while keeping Rigidbody drag intact
+    public bool useDriveAssist = true;
+    public float driveAssistForce = 30f; // acceleration applied (m/s^2) as assist (higher = faster)
+    public float drivetrainPower = 1.25f; // global multiplier on motor torque
+    public float dragCompensationFactor = 6f; // how aggressively we compensate when drag > recommended
+
+    [Header("Reverse / Collision Assist")]
+    public float reverseTorqueMultiplier = 2.0f; // multiplier when reversing normally
+    public float reverseMovingTorque = 4200f; // torque to initiate reversing when already moving
+    public float reverseBrakeAssist = 8000f; // extra brake applied when switching to reverse
+    public float reverseEngageSpeed = 0.6f; // m/s - below this full reverse torque is allowed
+    public float collisionIgnoreDuration = 0.35f; // time after collision to relax reverse assist
+
+    [Header("Traction & Stability")]
     public bool enableTractionControl = true;
     public float slipLimit = 0.25f;
     [Range(0f, 1f)] public float tractionControlStrength = 0.6f; // stronger correction
-
-    [Header("Stability Control")]
     public bool enableStabilityControl = true;
     public float stabilityStrength = 0.9f; // higher = more correction torque
 
@@ -60,9 +72,23 @@ public class CarController : MonoBehaviour
     float currentSteer = 0f;
     float currentBrakeTorque = 0f;
 
+    // Collision / traction-temp state
+    float lastCollisionTime = -10f; // timestamp of last physics collision
+    float tractionControlTempDisableUntil = -10f; // time until traction control is disabled
+    bool joystickActiveFlag = false;
+
     void Start()
     {
         rb = GetComponent<Rigidbody>();
+
+        if (rb != null && enforceRigidbodySettings)
+        {
+            rb.linearDamping = recommendedLinearDrag;
+            rb.angularDamping = recommendedAngularDrag;
+            rb.interpolation = RigidbodyInterpolation.Interpolate;
+            rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        }
+
         rb.centerOfMass += centerOfMassOffset;
 
         if (cameraTransform == null && Camera.main != null)
@@ -79,9 +105,13 @@ public class CarController : MonoBehaviour
         }
     }
 
+    void OnCollisionEnter(Collision collision)
+    {
+        lastCollisionTime = Time.time;
+    }
+
     void FixedUpdate()
     {
-        // Read speed early for steering scaling
         float speedKph = rb.linearVelocity.magnitude * 3.6f;
 
         // ---- INPUTS ----
@@ -101,19 +131,14 @@ public class CarController : MonoBehaviour
 
                 float angleToDesired = Vector3.SignedAngle(transform.forward, desiredDir, Vector3.up);
 
-                // Convert angle into steer input, apply sensitivity and reduce steering at high speed
                 float baseSteer = Mathf.Clamp(angleToDesired / maxSteerAngle, -1f, 1f) * steeringSensitivity;
                 float speedReduce = Mathf.Lerp(1f, steeringReductionAtTopSpeed, Mathf.Clamp01(speedKph / topSpeedKph));
                 steerInput = Mathf.Clamp(baseSteer * speedReduce, -1f, 1f);
-
-                // make steering response curve a bit sharper near extremes for snappy control
                 steerInput = Mathf.Sign(steerInput) * Mathf.Pow(Mathf.Abs(steerInput), steeringResponseCurve);
 
                 float forwardDot = Mathf.Clamp01(Vector3.Dot(transform.forward, desiredDir));
-                // give more throttle authority even if small angle to desired direction
                 motorInput = js.magnitude * (forwardDot > 0.05f ? 1f : 0.75f);
 
-                // if joystick points mostly backwards, invert motorInput sign to allow reversing
                 if (Vector2.Dot(js.normalized, Vector2.up) < -0.3f)
                 {
                     motorInput = -js.magnitude;
@@ -121,7 +146,6 @@ public class CarController : MonoBehaviour
             }
             else
             {
-                // local joystick: y = throttle, x = steer
                 motorInput = joystickInput.y;
                 steerInput = joystickInput.x;
                 steerInput = Mathf.Sign(steerInput) * Mathf.Pow(Mathf.Abs(steerInput), steeringResponseCurve);
@@ -134,13 +158,12 @@ public class CarController : MonoBehaviour
             steerInput = Mathf.Sign(steerInput) * Mathf.Pow(Mathf.Abs(steerInput), steeringResponseCurve);
         }
 
-        // Compute joystick active state
         bool joystickActive = useVirtualJoystick ? joystickInput.magnitude >= joystickDeadzone : !Mathf.Approximately(motorInput, 0f);
+        joystickActiveFlag = joystickActive;
 
-        // ---- STEERING (make immediate using MoveTowards for low-latency feel) ----
+        // ---- STEERING ----
         float targetSteer = steerInput * maxSteerAngle;
-        // MoveTowards gives consistent responsiveness (degrees per second feel)
-        currentSteer = Mathf.MoveTowards(currentSteer, targetSteer, steerSpeed * Time.fixedDeltaTime * 12f);
+        currentSteer = Mathf.MoveTowards(currentSteer, targetSteer, steerResponsiveness * Time.fixedDeltaTime);
 
         if (wheelColliders.Length >= 2)
         {
@@ -148,28 +171,68 @@ public class CarController : MonoBehaviour
             wheelColliders[1].steerAngle = currentSteer;
         }
 
-        // ---- BRAKES: ensure brakes are released quickly when player commands movement ----
+        // ---- BRAKES ----
         HandleBrakeRelease(motorInput, joystickActive);
 
-        // ---- TORQUE SCALING BY SPEED (immediate acceleration feel) ----
+        // ---- TORQUE CALC ----
         float speedFactor = Mathf.Clamp01(1f - (speedKph / topSpeedKph));
-
-        // Use a more aggressive torque curve so throttle feels powerful
-        float torqueScalar = 0.25f + 0.75f * speedFactor; // never drops below 25% of max
+        float torqueScalar = 0.15f + 0.85f * speedFactor; // keep some torque at top
         float effectiveMotor = maxMotorTorque * Mathf.Clamp(motorInput, -1f, 1f) * torqueScalar;
 
-        // boost reverse torque so player feels responsive when reversing
-        if (motorInput < 0f)
-            effectiveMotor *= reverseTorqueMultiplier;
+        // detect moving forward state
+        bool movingForward = Vector3.Dot(transform.forward, rb.linearVelocity) > 0.4f;
+        bool recentCollision = (Time.time - lastCollisionTime) < collisionIgnoreDuration;
 
-        // small mass compensation (keeps heavy cars lively)
+        // If player requests reverse while moving forward and there was a collision recently, allow immediate partial reverse
+        if (motorInput < 0f && movingForward && recentCollision && joystickActive)
+        {
+            // clear brakes immediately
+            for (int i = 0; i < wheelColliders.Length; i++)
+                wheelColliders[i].brakeTorque = 0f;
+
+            // give an immediate reverse 'kick' scaled by input
+            effectiveMotor = -Mathf.Max(reverseMovingTorque, maxMotorTorque * 0.5f) * Mathf.Abs(motorInput) * 0.7f;
+
+            // disable traction control briefly so we don't cut power
+            tractionControlTempDisableUntil = Time.time + 0.45f;
+        }
+        else if (motorInput < 0f && movingForward)
+        {
+            // normal reverse assist when switching direction
+            effectiveMotor = -reverseMovingTorque * Mathf.Abs(motorInput);
+        }
+        else
+        {
+            // normal forward or reverse scaling
+            if (motorInput < 0f)
+                effectiveMotor *= reverseTorqueMultiplier;
+        }
+
+        // mass compensation
         effectiveMotor *= Mathf.Clamp01(2000f / Mathf.Max(800f, rb.mass)) * 1.05f;
 
+        // drivetrain & drag compensation
+        float dragComp = Mathf.Clamp01((rb.linearDamping - recommendedLinearDrag) * dragCompensationFactor);
+        float finalMultiplier = drivetrainPower * (1f + dragComp);
+        effectiveMotor *= finalMultiplier;
+
+        effectiveMotor = Mathf.Clamp(effectiveMotor, -maxMotorTorque * 4f, maxMotorTorque * 4f);
+
         // ---- APPLY DRIVE & STABILITY ----
-        ApplyDrive(effectiveMotor);
+        ApplyDrive(effectiveMotor, motorInput);
         DoAntiRoll();
-        if (enableStabilityControl)
-            ApplyStabilityControl();
+        if (enableStabilityControl) ApplyStabilityControl();
+
+        // Drive assist: apply additional rigidbody acceleration to overcome high drag while keeping drag values
+        if (useDriveAssist && Mathf.Abs(motorInput) > 0.05f)
+        {
+            float currentSpeed = rb.linearVelocity.magnitude * 3.6f;
+            if ((motorInput > 0 && currentSpeed < topSpeedKph) || (motorInput < 0 && rb.linearVelocity.magnitude < reverseEngageSpeed * 1.5f))
+            {
+                // ForceMode.Acceleration ignores mass (applies m/s^2), nice for predictable feel across masses
+                rb.AddForce(transform.forward * Mathf.Sign(motorInput) * driveAssistForce, ForceMode.Acceleration);
+            }
+        }
 
         rb.AddForce(-transform.up * downforce * rb.linearVelocity.magnitude);
 
@@ -177,77 +240,132 @@ public class CarController : MonoBehaviour
         HandleSkids();
     }
 
-    // quick brake-release helper: when player requests movement (forwards or reverse) release brakes fast
     void HandleBrakeRelease(float motorInput, bool joystickActive)
     {
         float desiredBrake = 0f;
 
         if (!joystickActive)
         {
-            // default auto-stop behaviour
             if (rb.linearVelocity.magnitude > 0.05f)
                 desiredBrake = autoBrakeForce;
             else
                 desiredBrake = 0f;
 
-            // while fully inactive, remove motor torque to prevent creeping
             for (int i = 0; i < wheelColliders.Length; i++)
                 wheelColliders[i].motorTorque = 0f;
         }
         else
         {
-            // if player pushes forward OR reverse, release brakes quickly
             if (Mathf.Abs(motorInput) > 0.12f)
             {
-                // very fast release to avoid input lag
-                currentBrakeTorque = Mathf.Lerp(currentBrakeTorque, 0f, Time.fixedDeltaTime * brakeLerpSpeed * 12f);
-                desiredBrake = currentBrakeTorque;
+                currentBrakeTorque = 0f;
+                desiredBrake = 0f;
+
+                for (int i = 0; i < wheelColliders.Length; i++)
+                    wheelColliders[i].brakeTorque = 0f;
             }
             else
             {
-                // small stabilization brake when joystick horizontal only
                 if (rb.linearVelocity.magnitude > 1f)
                     desiredBrake = 50f;
                 else
                     desiredBrake = 0f;
 
-                // if player requests reverse while moving forward, do not apply full braking — allow quicker reversing
                 if (motorInput < -0.1f && Vector3.Dot(transform.forward, rb.linearVelocity) > 0.5f)
                     desiredBrake = Mathf.Min(desiredBrake, maxBrakeTorque * 0.25f);
             }
         }
 
-        // Smoothly lerp currentBrakeTorque to desired to avoid jolt
         currentBrakeTorque = Mathf.Lerp(currentBrakeTorque, desiredBrake, Time.fixedDeltaTime * brakeLerpSpeed);
 
         for (int i = 0; i < wheelColliders.Length; i++)
             wheelColliders[i].brakeTorque = currentBrakeTorque;
     }
 
-    void ApplyDrive(float torque)
+    void ApplyDrive(float torque, float motorInput)
     {
+        bool isReverse = torque < 0f;
+        float forwardVel = Vector3.Dot(transform.forward, rb.linearVelocity);
+        bool movingForward = forwardVel > 0.4f;
+
+        bool recentCollision = (Time.time - lastCollisionTime) < collisionIgnoreDuration;
+
         if (rearWheelDrive && wheelColliders.Length >= 4)
         {
-            // When reversing while the car still has forward velocity, apply torque but avoid fighting brakes too much
-            wheelColliders[2].motorTorque = AdjustForTraction(wheelColliders[2], torque);
-            wheelColliders[3].motorTorque = AdjustForTraction(wheelColliders[3], torque);
+            float tRL = torque;
+            float tRR = torque;
+
+            if (isReverse && movingForward && !recentCollision)
+            {
+                float extraBrake = Mathf.Clamp(rb.linearVelocity.magnitude * reverseBrakeAssist, 0f, maxBrakeTorque);
+                wheelColliders[2].brakeTorque = Mathf.Max(wheelColliders[2].brakeTorque, extraBrake);
+                wheelColliders[3].brakeTorque = Mathf.Max(wheelColliders[3].brakeTorque, extraBrake);
+
+                tRL *= 0.25f;
+                tRR *= 0.25f;
+
+                if (rb.linearVelocity.magnitude < reverseEngageSpeed)
+                {
+                    tRL = torque;
+                    tRR = torque;
+                }
+            }
+
+            // If we recently collided and player actively reverses, we already cleared brakes and applied a kick in FixedUpdate.
+            // Respect temporary traction-control disable if set
+            wheelColliders[2].motorTorque = AdjustForTraction(wheelColliders[2], tRL);
+            wheelColliders[3].motorTorque = AdjustForTraction(wheelColliders[3], tRR);
         }
 
         if (frontWheelDrive && wheelColliders.Length >= 2)
         {
-            wheelColliders[0].motorTorque = AdjustForTraction(wheelColliders[0], torque);
-            wheelColliders[1].motorTorque = AdjustForTraction(wheelColliders[1], torque);
+            float tFL = torque;
+            float tFR = torque;
+
+            if (isReverse && movingForward && !recentCollision)
+            {
+                float extraBrake = Mathf.Clamp(rb.linearVelocity.magnitude * reverseBrakeAssist, 0f, maxBrakeTorque);
+                wheelColliders[0].brakeTorque = Mathf.Max(wheelColliders[0].brakeTorque, extraBrake);
+                wheelColliders[1].brakeTorque = Mathf.Max(wheelColliders[1].brakeTorque, extraBrake);
+
+                tFL *= 0.25f;
+                tFR *= 0.25f;
+
+                if (rb.linearVelocity.magnitude < reverseEngageSpeed)
+                {
+                    tFL = torque;
+                    tFR = torque;
+                }
+            }
+
+            wheelColliders[0].motorTorque = AdjustForTraction(wheelColliders[0], tFL);
+            wheelColliders[1].motorTorque = AdjustForTraction(wheelColliders[1], tFR);
         }
 
         if (!rearWheelDrive && !frontWheelDrive)
         {
             for (int i = 0; i < wheelColliders.Length; i++)
-                wheelColliders[i].motorTorque = AdjustForTraction(wheelColliders[i], torque);
+            {
+                float t = torque;
+                bool movingF = Vector3.Dot(transform.forward, rb.linearVelocity) > 0.4f;
+                if (isReverse && movingF && !recentCollision)
+                {
+                    float extraBrake = Mathf.Clamp(rb.linearVelocity.magnitude * reverseBrakeAssist, 0f, maxBrakeTorque);
+                    wheelColliders[i].brakeTorque = Mathf.Max(wheelColliders[i].brakeTorque, extraBrake);
+                    t *= 0.25f;
+                    if (rb.linearVelocity.magnitude < reverseEngageSpeed) t = torque;
+                }
+
+                wheelColliders[i].motorTorque = AdjustForTraction(wheelColliders[i], t);
+            }
         }
     }
 
     float AdjustForTraction(WheelCollider wheel, float inputTorque)
     {
+        // Respect temporary disable window
+        if (Time.time < tractionControlTempDisableUntil) return inputTorque;
+
         if (!enableTractionControl || wheel == null) return inputTorque;
 
         WheelHit hit;
@@ -256,7 +374,6 @@ public class CarController : MonoBehaviour
             float sideways = Mathf.Abs(hit.sidewaysSlip);
             float forward = Mathf.Abs(hit.forwardSlip);
 
-            // Combine forward and sideways slip to determine reduction strength (progressive)
             float slipAmount = Mathf.Clamp01((sideways + forward * 0.5f) / (slipLimit * 2f));
             float reduction = Mathf.Clamp01(tractionControlStrength * slipAmount);
 
@@ -301,7 +418,6 @@ public class CarController : MonoBehaviour
         Vector3 localVel = transform.InverseTransformDirection(rb.linearVelocity);
         float slipAngle = Mathf.Atan2(localVel.x, localVel.z) * Mathf.Rad2Deg;
 
-        // Apply a corrective yaw torque proportional to slip angle and speed
         float speedFactor = Mathf.Clamp01(rb.linearVelocity.magnitude / 20f);
         float corrective = -slipAngle * stabilityStrength * speedFactor;
         corrective = Mathf.Clamp(corrective, -150f, 150f);
@@ -336,7 +452,6 @@ public class CarController : MonoBehaviour
                 float combinedSlip = sidewaysSlip + Mathf.Abs(hit.forwardSlip) * 0.5f;
                 bool isSkidding = combinedSlip > skidThreshold;
 
-                // Update skid trail position to contact point to ensure mark shows on ground
                 if (isSkidding && skidTrails.Length > i && skidTrails[i] != null)
                 {
                     skidTrails[i].transform.position = hit.point + Vector3.up * 0.02f;
@@ -351,7 +466,6 @@ public class CarController : MonoBehaviour
                     skidTrails[i].emitting = false;
                 }
 
-                // Control particle emission intensity based on slip amount
                 if (tireSmoke.Length > i && tireSmoke[i] != null)
                 {
                     var em = tireSmoke[i].emission;
@@ -371,7 +485,6 @@ public class CarController : MonoBehaviour
             }
             else
             {
-                // Wheel not touching ground -> disable effects
                 if (tireSmoke.Length > i && tireSmoke[i] != null)
                 {
                     var em = tireSmoke[i].emission;

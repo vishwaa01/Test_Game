@@ -1,193 +1,277 @@
 using UnityEngine;
-#if ENABLE_INPUT_SYSTEM
-using UnityEngine.InputSystem; // Optional: New Input System
-#endif
 
 [RequireComponent(typeof(Rigidbody))]
 public class ArcadeCarController : MonoBehaviour
 {
-    [Header("Speed & Acceleration")]
-    [Tooltip("Top forward speed in m/s.")]
-    public float maxSpeed = 30f;
-    [Tooltip("Top reverse speed in m/s.")]
-    public float maxReverseSpeed = 15f;
-    [Tooltip("Forward accel (m/s^2).")]
-    public float acceleration = 45f;
-    [Tooltip("Braking / reverse accel (m/s^2).")]
-    public float brakeAcceleration = 60f;
+    [Header("Wheel Colliders (0:FL,1:FR,2:RL,3:RR)")]
+    public WheelCollider[] wheelColliders = new WheelCollider[4];
+    public Transform[] wheelMeshes = new Transform[4];
 
-    [Header("Steering")]
-    [Tooltip("Base steer rate in deg/s at low speed.")]
-    public float baseSteerRate = 120f;
-    [Tooltip("How quickly angular velocity y blends to target.")]
-    public float steerResponsiveness = 8f;
-    [Tooltip("Reduce steer at high speed (0..1 contribution).")]
-    public float highSpeedSteerFactor = 0.5f;
+    [Header("Drive (separate forward/reverse)")]
+    public float motorTorqueForward = 800f;    // forward torque magnitude
+    public float motorTorqueReverse = 1400f;   // reverse (stronger) torque magnitude
+    public float brakeTorque = 1500f;
+    public float handbrakeTorque = 2500f;
+    public float maxSpeed = 22f;               // forward top speed (m/s)
+    public float maxReverseSpeed = 10f;        // reverse top speed (m/s)
 
-    [Header("Grip & Drift")]
-    [Tooltip("Lateral velocity damping strength.")]
-    public float lateralGrip = 6f;
-    [Tooltip("Grip multiplier while drifting (hold drift).")]
-    public float driftGripMultiplier = 0.35f;
+    [Header("Steering & Drift")]
+    public float maxSteerAngle = 30f;
+    public float steerHelper = 0.5f;
 
-    [Header("Downforce & Gravity")]
-    [Tooltip("Downforce coefficient per m/s.")]
-    public float downforcePerSpeed = 0.6f;
-    [Tooltip("Extra gravity scale (1 = default gravity).")]
-    public float gravityMultiplier = 1.2f;
+    [Header("Friction / Drift tuning")]
+    [Tooltip("Sideways slip threshold to consider a wheel 'skidding'")]
+    public float skidSlipThreshold = 0.25f;
+    [Range(0.1f, 1f)]
+    public float driftStiffness = 0.8f;        // stiffness factor when handbrake engaged
 
-    [Header("Drag")]
-    [Tooltip("Rigidbody.drag when grounded.")]
-    public float groundDrag = 0.4f;
-    [Tooltip("Rigidbody.drag when airborne.")]
-    public float airDrag = 0.05f;
-    [Tooltip("Rigidbody.angularDrag (always applied).")]
-    public float angularDrag = 2f;
+    [Header("Rigidbody")]
+    public Vector3 centerOfMassOffset = new Vector3(0f, -0.4f, 0f);
+    public float downforce = 100f;
 
-    [Header("Grounding")]
-    [Tooltip("Ray length to detect ground below car.")]
-    public float groundRayLength = 1.5f;
-    [Tooltip("Layers treated as drivable ground.")]
-    public LayerMask groundMask = ~0;
-    [Tooltip("How fast the car tilts to ground normal.")]
-    public float groundTiltLerp = 10f;
+    [Header("Effects - Rear Left, Rear Right (indices map to wheel order)")]
+    public TrailRenderer trailRL;
+    public TrailRenderer trailRR;
+    public ParticleSystem smokeRL;
+    public ParticleSystem smokeRR;
 
-    [Header("Wheel Visuals")]
-    public Transform wheelFL;
-    public Transform wheelFR;
-    public Transform wheelRL;
-    public Transform wheelRR;
-    [Tooltip("Approximate wheel radius in meters.")]
-    public float wheelRadius = 0.35f;
+    [Header("Misc")]
+    public bool useHandbrake = true;
 
     Rigidbody rb;
-    bool grounded;
-    Vector3 groundNormal = Vector3.up;
 
-    // Inputs
-    Vector2 moveInput; // x = steer (-1..1), y = throttle (-1..1)
-    bool driftHeld;
+    // internal
+    private float inputSteer;
+    private float inputThrottle;
+    private bool inputHandbrake;
+    private float currentSpeed;
 
-    void Awake()
+    // store original sideways friction for rear wheels (2 and 3)
+    private WheelFrictionCurve[] originalRearSideways = null;
+
+    void Start()
     {
         rb = GetComponent<Rigidbody>();
+        rb.centerOfMass += centerOfMassOffset;
         rb.interpolation = RigidbodyInterpolation.Interpolate;
-        rb.angularDamping = angularDrag;
-        rb.linearDamping = groundDrag;
+        rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
+
+        // cache original rear sideways friction
+        if (wheelColliders.Length >= 4)
+        {
+            originalRearSideways = new WheelFrictionCurve[2];
+            originalRearSideways[0] = wheelColliders[2].sidewaysFriction;
+            originalRearSideways[1] = wheelColliders[3].sidewaysFriction;
+        }
+
+        // Ensure trails are disabled initially and cleared
+        if (trailRL) { trailRL.emitting = false; trailRL.Clear(); }
+        if (trailRR) { trailRR.emitting = false; trailRR.Clear(); }
+        if (smokeRL) { var e = smokeRL.emission; e.enabled = false; }
+        if (smokeRR) { var e = smokeRR.emission; e.enabled = false; }
     }
 
     void Update()
     {
-        // Read inputs (works with old Input Manager; optional new Input System below).
-#if ENABLE_INPUT_SYSTEM
-        // If Input System is installed, read from Keyboard (or map to your InputActions).
-        float steer = 0f;
-        float throttle = 0f;
+        inputSteer = Input.GetAxis("Horizontal");
+        inputThrottle = Input.GetAxis("Vertical");
+        inputHandbrake = useHandbrake && Input.GetKey(KeyCode.Space);
 
-        if (Keyboard.current != null)
-        {
-            steer += Keyboard.current.aKey.isPressed ? -1f : 0f;
-            steer += Keyboard.current.dKey.isPressed ? +1f : 0f;
-
-            throttle += Keyboard.current.sKey.isPressed ? -1f : 0f;
-            throttle += Keyboard.current.wKey.isPressed ? +1f : 0f;
-
-            driftHeld = Keyboard.current.spaceKey.isPressed;
-        }
-
-        moveInput = Vector2.ClampMagnitude(new Vector2(steer, throttle), 1f);
-#else
-        moveInput = new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical"));
-        driftHeld = Input.GetKey(KeyCode.Space);
-#endif
+        UpdateWheelMeshes();
     }
 
     void FixedUpdate()
     {
-        // 1) Ground check and tilt towards ground normal for stable visuals/handling.
-        DoGroundCheckAndTilt();
+        currentSpeed = rb.linearVelocity.magnitude;
 
-        // 2) Compute local velocity for intuitive control.
-        Vector3 localVel = transform.InverseTransformDirection(rb.linearVelocity);
-        float speedForward = localVel.z;
-        float speedAbs = new Vector2(localVel.x, localVel.z).magnitude;
+        // Steering (less at high speed)
+        float speedFactor = Mathf.Clamp01(1f - (currentSpeed / maxSpeed));
+        float steer = maxSteerAngle * inputSteer * (0.5f + 0.5f * speedFactor);
+        wheelColliders[0].steerAngle = steer;
+        wheelColliders[1].steerAngle = steer;
 
-        // 3) Throttle/brake forces (arcade accel along forward).
-        float accel = moveInput.y >= 0f ? acceleration * moveInput.y : brakeAcceleration * moveInput.y;
-        rb.AddForce(transform.forward * accel, ForceMode.Acceleration);
+        ApplyMotorAndBrakes();
 
-        // 4) Speed limiting (forward vs reverse).
-        float maxF = moveInput.y >= 0f ? maxSpeed : maxReverseSpeed;
-        Vector3 flatVel = Vector3.ProjectOnPlane(rb.linearVelocity, Vector3.up);
-        float flatSpeed = flatVel.magnitude;
-        if (flatSpeed > maxF)
-        {
-            // Nudge back toward cap without hard snapping.
-            Vector3 excessDir = flatVel.normalized;
-            float excess = flatSpeed - maxF;
-            rb.AddForce(-excessDir * excess * 5f, ForceMode.Acceleration);
-        }
+        // downforce
+        rb.AddForce(-transform.up * downforce * rb.linearVelocity.magnitude);
 
-        // 5) Lateral grip and drift control (damp sideways slide).
-        float grip = lateralGrip * (driftHeld ? driftGripMultiplier : 1f);
-        localVel.x = Mathf.Lerp(localVel.x, 0f, grip * Time.fixedDeltaTime);
-        rb.linearVelocity = transform.TransformDirection(localVel);
+        // small stability helper
+        SteerHelper();
 
-        // 6) Steering by shaping angular velocity around Y (strong at low speed, milder at high).
-        float speedFactor = Mathf.Clamp01(flatSpeed / Mathf.Max(1f, maxSpeed));
-        float steerRate = Mathf.Lerp(baseSteerRate, baseSteerRate * highSpeedSteerFactor, speedFactor);
-        float targetYawRateDeg = moveInput.x * steerRate;
-        float targetYawRateRad = targetYawRateDeg * Mathf.Deg2Rad;
-
-        Vector3 angVel = rb.angularVelocity;
-        float newYaw = Mathf.Lerp(angVel.y, targetYawRateRad, steerResponsiveness * Time.fixedDeltaTime);
-        rb.angularVelocity = new Vector3(0f, newYaw, 0f);
-
-        // 7) Downforce scales with speed when grounded for planted feel.
-        if (grounded)
-        {
-            rb.AddForce(-transform.up * (flatSpeed * downforcePerSpeed), ForceMode.Acceleration);
-        }
-
-        // 8) Extra gravity keeps car settled over bumps/airtime.
-        rb.AddForce(Physics.gravity * (gravityMultiplier - 1f), ForceMode.Acceleration);
-
-        // 9) Adjust drag by state.
-        rb.linearDamping = grounded ? groundDrag : airDrag;
-
-        // 10) Spin wheel visuals.
-        SpinWheelVisuals(speedForward);
+        UpdateSkidEffects();
     }
 
-    void DoGroundCheckAndTilt()
+    void ApplyMotorAndBrakes()
     {
-        Ray ray = new Ray(transform.position + Vector3.up * 0.1f, -transform.up);
-        if (Physics.Raycast(ray, out RaycastHit hit, groundRayLength, groundMask, QueryTriggerInteraction.Ignore))
+        // compute forward velocity along car forward axis
+        float velForward = Vector3.Dot(rb.linearVelocity, transform.forward);
+
+        float throttle = inputThrottle; // -1..1
+
+        // Decide motor torque depending on sign of throttle
+        float appliedMotorTorque = 0f;
+        if (throttle > 0f)
         {
-            grounded = true;
-            groundNormal = hit.normal;
-
-            // Smoothly tilt car up-vector toward ground normal.
-            Quaternion toGround = Quaternion.FromToRotation(transform.up, groundNormal) * transform.rotation;
-            Quaternion target = Quaternion.Slerp(transform.rotation, toGround, groundTiltLerp * Time.fixedDeltaTime);
-
-            // For an arcade feel we can directly set rotation; for stricter physics use torque alignment.
-            rb.MoveRotation(target);
+            // if above forward top speed, don't add more forward torque
+            if (velForward < maxSpeed)
+                appliedMotorTorque = throttle * motorTorqueForward;
+            else
+                appliedMotorTorque = 0f;
+        }
+        else if (throttle < 0f)
+        {
+            // if above reverse max speed (in reverse direction), don't add more reverse torque
+            if (velForward > -maxReverseSpeed || Mathf.Abs(velForward) < 0.5f) // allow to start reversing from near stop
+                appliedMotorTorque = throttle * motorTorqueReverse; // throttle is negative so torque will be negative
+            else
+                appliedMotorTorque = 0f;
         }
         else
         {
-            grounded = false;
-            groundNormal = Vector3.up;
+            appliedMotorTorque = 0f;
+        }
+
+        // apply motor torque to rear wheels (RL and RR)
+        wheelColliders[2].motorTorque = appliedMotorTorque;
+        wheelColliders[3].motorTorque = appliedMotorTorque;
+
+        // Braking logic:
+        // Only apply heavy brake when player explicitly wants to brake or when velocity and input are opposite and car is moving reasonably fast.
+        float appliedBrake = 0f;
+        bool wantsBrake = false;
+        // Player pressed opposite pedal: e.g. pressing forward while moving strongly backward, or pressing backward while moving forward
+        if (Mathf.Abs(throttle) > 0.01f)
+        {
+            float dot = Mathf.Sign(throttle) * velForward;
+            if (dot < -0.1f && Mathf.Abs(velForward) > 0.5f)
+            {
+                wantsBrake = true;
+            }
+        }
+
+        if (wantsBrake)
+            appliedBrake = brakeTorque;
+        else
+            appliedBrake = 0f;
+
+        // Handbrake overrides and loosens rear friction
+        if (inputHandbrake)
+        {
+            wheelColliders[2].brakeTorque = handbrakeTorque;
+            wheelColliders[3].brakeTorque = handbrakeTorque;
+            ReduceRearFriction(driftStiffness);
+        }
+        else
+        {
+            // set brake for all wheels only when braking explicitly (prevents accidental slow reverse after collisions)
+            wheelColliders[0].brakeTorque = appliedBrake;
+            wheelColliders[1].brakeTorque = appliedBrake;
+            wheelColliders[2].brakeTorque = appliedBrake;
+            wheelColliders[3].brakeTorque = appliedBrake;
+
+            RestoreRearFriction();
         }
     }
 
-    void SpinWheelVisuals(float forwardSpeed)
+    void ReduceRearFriction(float stiffnessFactor)
     {
-        if (wheelRadius <= 0.0001f) return;
-        float omega = (forwardSpeed / wheelRadius) * Mathf.Rad2Deg * Time.fixedDeltaTime;
-        if (wheelFL) wheelFL.Rotate(Vector3.right, omega, Space.Self);
-        if (wheelFR) wheelFR.Rotate(Vector3.right, omega, Space.Self);
-        if (wheelRL) wheelRL.Rotate(Vector3.right, omega, Space.Self);
-        if (wheelRR) wheelRR.Rotate(Vector3.right, omega, Space.Self);
+        if (originalRearSideways == null) return;
+        WheelFrictionCurve ws2 = wheelColliders[2].sidewaysFriction;
+        WheelFrictionCurve ws3 = wheelColliders[3].sidewaysFriction;
+        ws2.stiffness = originalRearSideways[0].stiffness * stiffnessFactor;
+        ws3.stiffness = originalRearSideways[1].stiffness * stiffnessFactor;
+        wheelColliders[2].sidewaysFriction = ws2;
+        wheelColliders[3].sidewaysFriction = ws3;
+    }
+
+    void RestoreRearFriction()
+    {
+        if (originalRearSideways == null) return;
+        wheelColliders[2].sidewaysFriction = originalRearSideways[0];
+        wheelColliders[3].sidewaysFriction = originalRearSideways[1];
+    }
+
+    void UpdateWheelMeshes()
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            if (wheelMeshes == null || wheelMeshes.Length <= i) continue;
+            if (wheelMeshes[i] == null || wheelColliders[i] == null) continue;
+            Vector3 pos;
+            Quaternion rot;
+            wheelColliders[i].GetWorldPose(out pos, out rot);
+            wheelMeshes[i].position = pos;
+            wheelMeshes[i].rotation = rot;
+        }
+    }
+
+    void SteerHelper()
+    {
+        if (Mathf.Abs(inputSteer) > 0.01f)
+        {
+            Vector3 vel = rb.linearVelocity;
+            Vector3 localVel = transform.InverseTransformDirection(vel);
+            localVel.x *= 1f - steerHelper * (rb.linearVelocity.magnitude / maxSpeed);
+            rb.linearVelocity = transform.TransformDirection(localVel);
+        }
+    }
+
+    // Returns true if the specified wheel (index) is skidding (enough sideways slip)
+    bool IsWheelSkidding(int wheelIndex)
+    {
+        if (wheelColliders[wheelIndex] == null) return false;
+        WheelHit hit;
+        if (wheelColliders[wheelIndex].GetGroundHit(out hit))
+        {
+            // only count real sideways slip above threshold and wheel is grounded
+            if (Mathf.Abs(hit.sidewaysSlip) > skidSlipThreshold)
+                return true;
+        }
+        return false;
+    }
+
+    void UpdateSkidEffects()
+    {
+        // Only rear wheels produce smoke/trail (2 = RL, 3 = RR)
+        bool skidRL = IsWheelSkidding(2);
+        bool skidRR = IsWheelSkidding(3);
+
+        ToggleTrail(trailRL, skidRL);
+        ToggleTrail(trailRR, skidRR);
+        ToggleSmoke(smokeRL, skidRL);
+        ToggleSmoke(smokeRR, skidRR);
+    }
+
+    void ToggleTrail(TrailRenderer t, bool on)
+    {
+        if (t == null) return;
+        if (on && !t.emitting)
+        {
+            t.Clear();   // clear previous trail then enable to avoid ghost
+            t.emitting = true;
+        }
+        else if (!on && t.emitting)
+        {
+            t.emitting = false;
+            // keep one last frame? we clear so player doesn't see ghost lines
+            t.Clear();
+        }
+    }
+
+    void ToggleSmoke(ParticleSystem ps, bool on)
+    {
+        if (ps == null) return;
+        var emission = ps.emission;
+        if (on && !ps.isPlaying)
+        {
+            emission.enabled = true;
+            ps.Play(true);
+        }
+        else if (!on && ps.isPlaying)
+        {
+            emission.enabled = false;
+            ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+            ps.Clear();
+        }
     }
 }
