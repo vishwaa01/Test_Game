@@ -10,110 +10,67 @@ public class CarController : MonoBehaviour
     [Header("Effects")]
     public ParticleSystem[] tireSmoke = new ParticleSystem[4];
     public TrailRenderer[] skidTrails = new TrailRenderer[4];
-    public float skidThreshold = 0.25f; // lower to detect skids earlier on mobile
-    public float smokeEmissionRate = 60f; // particles per second when fully skidding
+    public float skidThreshold = 0.4f;
 
     [Header("Drive")]
     public bool rearWheelDrive = true;
     public bool frontWheelDrive = false;
-    public float maxMotorTorque = 9000f; // engine peak
-    public float maxBrakeTorque = 6000f;
+    public float maxMotorTorque = 1200f;
+    public float maxBrakeTorque = 3000f;
 
-    [Header("Steer")]
-    public float maxSteerAngle = 38f;
-    public float steerResponsiveness = 540f; // degrees per second - high value for immediate feel
-    public float steeringSensitivity = 1.2f; // multiplier for joystick world-direction mapping
-    public float steeringReductionAtTopSpeed = 0.45f; // how much steering is reduced at top speed
-    public float steeringResponseCurve = 1.05f; // >1 = more aggressive near edges
+    [Header("Steering")]
+    public float maxSteerAngle = 30f;
+    public float steerSpeed = 5f;
 
     [Header("Stability & Feel")]
-    public Vector3 centerOfMassOffset = new Vector3(0, -0.6f, 0);
+    public Vector3 centerOfMassOffset = new Vector3(0, -0.5f, 0);
     public float antiRoll = 5000f;
-    public float downforce = 60f;
-    public float topSpeedKph = 220f;
+    public float downforce = 50f;
+    public float topSpeedKph = 180f;
 
-    [Header("Rigidbody (auto-adjust)")]
-    public float recommendedLinearDrag = 0.01f;   // default linear drag for arcade feel
-    public float recommendedAngularDrag = 0.05f;  // default angular drag
-    public bool enforceRigidbodySettings = true;
+    [Header("Tuning")]
+    public float motorTorqueCurve = 1.0f;
 
-    [Header("Drivetrain Assist")]
-    // Helps the car reach target speeds while keeping Rigidbody drag intact
-    public bool useDriveAssist = true;
-    public float driveAssistForce = 30f; // acceleration applied (m/s^2) as assist (higher = faster)
-    public float drivetrainPower = 1.25f; // global multiplier on motor torque
-    public float dragCompensationFactor = 6f; // how aggressively we compensate when drag > recommended
-
-    [Header("Reverse / Collision Assist")]
-    public float reverseTorqueMultiplier = 2.0f; // multiplier when reversing normally
-    public float reverseMovingTorque = 4200f; // torque to initiate reversing when already moving
-    public float reverseBrakeAssist = 8000f; // extra brake applied when switching to reverse
-    public float reverseEngageSpeed = 0.6f; // m/s - below this full reverse torque is allowed
-    public float collisionIgnoreDuration = 0.35f; // time after collision to relax reverse assist
-
-    [Header("Traction & Stability")]
+    [Header("Traction Control")]
     public bool enableTractionControl = true;
-    public float slipLimit = 0.25f;
-    [Range(0f, 1f)] public float tractionControlStrength = 0.6f; // stronger correction
+    public float slipLimit = 0.3f;
+    public float tractionControlStrength = 0.5f;
+
+    [Header("Stability Control")]
     public bool enableStabilityControl = true;
-    public float stabilityStrength = 0.9f; // higher = more correction torque
+    public float stabilityStrength = 0.8f; // higher = more correction force
 
     [Header("Mobile / Joystick")]
+    // If true, the controller will read from the public joystickInput (set from your touch joystick script)
+    // If false, it uses Unity's Input axes (useful for editor testing).
     public bool useVirtualJoystick = true;
+    // The joystick input should be set from your UI joystick: x = left/right (-1..1), y = forward/back (-1..1)
     [HideInInspector] public Vector2 joystickInput = Vector2.zero;
-    public bool useJoystickWorldDirection = true;
-    public Transform cameraTransform;
-    public float joystickDeadzone = 0.12f;
-    public float autoBrakeForce = 2500f; // peak braking when joystick released
-    public float brakeLerpSpeed = 12f; // how quickly brake torque is applied/removed
 
-    // Internal
+    // When true the joystick direction is interpreted in world-space relative to camera direction.
+    // The car will attempt to steer toward that world direction and drive forward automatically.
+    public bool useJoystickWorldDirection = true;
+    public Transform cameraTransform; // required for world-direction mode (assign your main camera here)
+
+    // When joystick is released (magnitude < deadzone) we apply braking so car comes to a stop automatically
+    public float joystickDeadzone = 0.15f;
+    public float autoBrakeForce = 3000f; // brakeTorque applied automatically when joystick released
+
     Rigidbody rb;
     float currentSteer = 0f;
-    float currentBrakeTorque = 0f;
-
-    // Collision / traction-temp state
-    float lastCollisionTime = -10f; // timestamp of last physics collision
-    float tractionControlTempDisableUntil = -10f; // time until traction control is disabled
-    bool joystickActiveFlag = false;
 
     void Start()
     {
         rb = GetComponent<Rigidbody>();
-
-        if (rb != null && enforceRigidbodySettings)
-        {
-            rb.linearDamping = recommendedLinearDrag;
-            rb.angularDamping = recommendedAngularDrag;
-            rb.interpolation = RigidbodyInterpolation.Interpolate;
-            rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-        }
-
         rb.centerOfMass += centerOfMassOffset;
 
+        // If camera not assigned and main camera exists, auto-assign it for convenience
         if (cameraTransform == null && Camera.main != null)
             cameraTransform = Camera.main.transform;
-
-        // Ensure particle emission modules start disabled to avoid continuous smoke
-        for (int i = 0; i < tireSmoke.Length; i++)
-        {
-            if (tireSmoke[i] != null)
-            {
-                var em = tireSmoke[i].emission;
-                em.enabled = false;
-            }
-        }
-    }
-
-    void OnCollisionEnter(Collision collision)
-    {
-        lastCollisionTime = Time.time;
     }
 
     void FixedUpdate()
     {
-        float speedKph = rb.linearVelocity.magnitude * 3.6f;
-
         // ---- INPUTS ----
         float motorInput = 0f;
         float steerInput = 0f;
@@ -121,49 +78,50 @@ public class CarController : MonoBehaviour
         if (useVirtualJoystick)
         {
             Vector2 js = joystickInput;
-            if (js.magnitude < joystickDeadzone) js = Vector2.zero;
+            // apply deadzone
+            if (js.magnitude < joystickDeadzone)
+            {
+                js = Vector2.zero;
+            }
 
             if (useJoystickWorldDirection && js != Vector2.zero && cameraTransform != null)
             {
+                // Convert joystick to world-space direction relative to camera forward
                 Vector3 camForward = Vector3.ProjectOnPlane(cameraTransform.forward, Vector3.up).normalized;
                 Vector3 camRight = Vector3.ProjectOnPlane(cameraTransform.right, Vector3.up).normalized;
                 Vector3 desiredDir = (camForward * js.y + camRight * js.x).normalized;
 
+                // Compute angle between car forward and desired direction in degrees (+ right, - left)
                 float angleToDesired = Vector3.SignedAngle(transform.forward, desiredDir, Vector3.up);
 
-                float baseSteer = Mathf.Clamp(angleToDesired / maxSteerAngle, -1f, 1f) * steeringSensitivity;
-                float speedReduce = Mathf.Lerp(1f, steeringReductionAtTopSpeed, Mathf.Clamp01(speedKph / topSpeedKph));
-                steerInput = Mathf.Clamp(baseSteer * speedReduce, -1f, 1f);
-                steerInput = Mathf.Sign(steerInput) * Mathf.Pow(Mathf.Abs(steerInput), steeringResponseCurve);
+                // Map angle to steering input (-1..1)
+                steerInput = Mathf.Clamp(angleToDesired / maxSteerAngle, -1f, 1f);
 
+                // Motor input: drive forward proportional to joystick magnitude and the forward component
                 float forwardDot = Mathf.Clamp01(Vector3.Dot(transform.forward, desiredDir));
-                motorInput = js.magnitude * (forwardDot > 0.05f ? 1f : 0.75f);
-
-                if (Vector2.Dot(js.normalized, Vector2.up) < -0.3f)
-                {
-                    motorInput = -js.magnitude;
-                }
+                motorInput = js.magnitude * (forwardDot > 0.1f ? 1f : 0.6f); // if backwards, reduce throttle
             }
             else
             {
+                // Local-style joystick: y = throttle, x = steer
                 motorInput = joystickInput.y;
                 steerInput = joystickInput.x;
-                steerInput = Mathf.Sign(steerInput) * Mathf.Pow(Mathf.Abs(steerInput), steeringResponseCurve);
             }
         }
         else
         {
             motorInput = Input.GetAxis("Vertical");
             steerInput = Input.GetAxis("Horizontal");
-            steerInput = Mathf.Sign(steerInput) * Mathf.Pow(Mathf.Abs(steerInput), steeringResponseCurve);
         }
 
-        bool joystickActive = useVirtualJoystick ? joystickInput.magnitude >= joystickDeadzone : !Mathf.Approximately(motorInput, 0f);
-        joystickActiveFlag = joystickActive;
+        // ---- TORQUE SCALING BY SPEED ----
+        float speedKph = rb.linearVelocity.magnitude * 3.6f;
+        float speedFactor = Mathf.Clamp01(1f - (speedKph / topSpeedKph));
+        float effectiveMotor = maxMotorTorque * motorInput * Mathf.Pow(speedFactor, motorTorqueCurve);
 
-        // ---- STEERING ----
+        // ---- STEERING SMOOTHING ----
         float targetSteer = steerInput * maxSteerAngle;
-        currentSteer = Mathf.MoveTowards(currentSteer, targetSteer, steerResponsiveness * Time.fixedDeltaTime);
+        currentSteer = Mathf.Lerp(currentSteer, targetSteer, Time.fixedDeltaTime * steerSpeed);
 
         if (wheelColliders.Length >= 2)
         {
@@ -171,68 +129,14 @@ public class CarController : MonoBehaviour
             wheelColliders[1].steerAngle = currentSteer;
         }
 
-        // ---- BRAKES ----
-        HandleBrakeRelease(motorInput, joystickActive);
+        // ---- DRIVE & BRAKES ----
+        ApplyDrive(effectiveMotor);
+        ApplyBrakesAutoStop(motorInput);
 
-        // ---- TORQUE CALC ----
-        float speedFactor = Mathf.Clamp01(1f - (speedKph / topSpeedKph));
-        float torqueScalar = 0.15f + 0.85f * speedFactor; // keep some torque at top
-        float effectiveMotor = maxMotorTorque * Mathf.Clamp(motorInput, -1f, 1f) * torqueScalar;
-
-        // detect moving forward state
-        bool movingForward = Vector3.Dot(transform.forward, rb.linearVelocity) > 0.4f;
-        bool recentCollision = (Time.time - lastCollisionTime) < collisionIgnoreDuration;
-
-        // If player requests reverse while moving forward and there was a collision recently, allow immediate partial reverse
-        if (motorInput < 0f && movingForward && recentCollision && joystickActive)
-        {
-            // clear brakes immediately
-            for (int i = 0; i < wheelColliders.Length; i++)
-                wheelColliders[i].brakeTorque = 0f;
-
-            // give an immediate reverse 'kick' scaled by input
-            effectiveMotor = -Mathf.Max(reverseMovingTorque, maxMotorTorque * 0.5f) * Mathf.Abs(motorInput) * 0.7f;
-
-            // disable traction control briefly so we don't cut power
-            tractionControlTempDisableUntil = Time.time + 0.45f;
-        }
-        else if (motorInput < 0f && movingForward)
-        {
-            // normal reverse assist when switching direction
-            effectiveMotor = -reverseMovingTorque * Mathf.Abs(motorInput);
-        }
-        else
-        {
-            // normal forward or reverse scaling
-            if (motorInput < 0f)
-                effectiveMotor *= reverseTorqueMultiplier;
-        }
-
-        // mass compensation
-        effectiveMotor *= Mathf.Clamp01(2000f / Mathf.Max(800f, rb.mass)) * 1.05f;
-
-        // drivetrain & drag compensation
-        float dragComp = Mathf.Clamp01((rb.linearDamping - recommendedLinearDrag) * dragCompensationFactor);
-        float finalMultiplier = drivetrainPower * (1f + dragComp);
-        effectiveMotor *= finalMultiplier;
-
-        effectiveMotor = Mathf.Clamp(effectiveMotor, -maxMotorTorque * 4f, maxMotorTorque * 4f);
-
-        // ---- APPLY DRIVE & STABILITY ----
-        ApplyDrive(effectiveMotor, motorInput);
+        // ---- STABILITY HELPERS ----
         DoAntiRoll();
-        if (enableStabilityControl) ApplyStabilityControl();
-
-        // Drive assist: apply additional rigidbody acceleration to overcome high drag while keeping drag values
-        if (useDriveAssist && Mathf.Abs(motorInput) > 0.05f)
-        {
-            float currentSpeed = rb.linearVelocity.magnitude * 3.6f;
-            if ((motorInput > 0 && currentSpeed < topSpeedKph) || (motorInput < 0 && rb.linearVelocity.magnitude < reverseEngageSpeed * 1.5f))
-            {
-                // ForceMode.Acceleration ignores mass (applies m/s^2), nice for predictable feel across masses
-                rb.AddForce(transform.forward * Mathf.Sign(motorInput) * driveAssistForce, ForceMode.Acceleration);
-            }
-        }
+        if (enableStabilityControl)
+            ApplyStabilityControl();
 
         rb.AddForce(-transform.up * downforce * rb.linearVelocity.magnitude);
 
@@ -240,147 +144,79 @@ public class CarController : MonoBehaviour
         HandleSkids();
     }
 
-    void HandleBrakeRelease(float motorInput, bool joystickActive)
+    void ApplyDrive(float torque)
     {
-        float desiredBrake = 0f;
-
-        if (!joystickActive)
-        {
-            if (rb.linearVelocity.magnitude > 0.05f)
-                desiredBrake = autoBrakeForce;
-            else
-                desiredBrake = 0f;
-
-            for (int i = 0; i < wheelColliders.Length; i++)
-                wheelColliders[i].motorTorque = 0f;
-        }
-        else
-        {
-            if (Mathf.Abs(motorInput) > 0.12f)
-            {
-                currentBrakeTorque = 0f;
-                desiredBrake = 0f;
-
-                for (int i = 0; i < wheelColliders.Length; i++)
-                    wheelColliders[i].brakeTorque = 0f;
-            }
-            else
-            {
-                if (rb.linearVelocity.magnitude > 1f)
-                    desiredBrake = 50f;
-                else
-                    desiredBrake = 0f;
-
-                if (motorInput < -0.1f && Vector3.Dot(transform.forward, rb.linearVelocity) > 0.5f)
-                    desiredBrake = Mathf.Min(desiredBrake, maxBrakeTorque * 0.25f);
-            }
-        }
-
-        currentBrakeTorque = Mathf.Lerp(currentBrakeTorque, desiredBrake, Time.fixedDeltaTime * brakeLerpSpeed);
-
-        for (int i = 0; i < wheelColliders.Length; i++)
-            wheelColliders[i].brakeTorque = currentBrakeTorque;
-    }
-
-    void ApplyDrive(float torque, float motorInput)
-    {
-        bool isReverse = torque < 0f;
-        float forwardVel = Vector3.Dot(transform.forward, rb.linearVelocity);
-        bool movingForward = forwardVel > 0.4f;
-
-        bool recentCollision = (Time.time - lastCollisionTime) < collisionIgnoreDuration;
-
         if (rearWheelDrive && wheelColliders.Length >= 4)
         {
-            float tRL = torque;
-            float tRR = torque;
-
-            if (isReverse && movingForward && !recentCollision)
-            {
-                float extraBrake = Mathf.Clamp(rb.linearVelocity.magnitude * reverseBrakeAssist, 0f, maxBrakeTorque);
-                wheelColliders[2].brakeTorque = Mathf.Max(wheelColliders[2].brakeTorque, extraBrake);
-                wheelColliders[3].brakeTorque = Mathf.Max(wheelColliders[3].brakeTorque, extraBrake);
-
-                tRL *= 0.25f;
-                tRR *= 0.25f;
-
-                if (rb.linearVelocity.magnitude < reverseEngageSpeed)
-                {
-                    tRL = torque;
-                    tRR = torque;
-                }
-            }
-
-            // If we recently collided and player actively reverses, we already cleared brakes and applied a kick in FixedUpdate.
-            // Respect temporary traction-control disable if set
-            wheelColliders[2].motorTorque = AdjustForTraction(wheelColliders[2], tRL);
-            wheelColliders[3].motorTorque = AdjustForTraction(wheelColliders[3], tRR);
+            wheelColliders[2].motorTorque = AdjustForTraction(wheelColliders[2], torque);
+            wheelColliders[3].motorTorque = AdjustForTraction(wheelColliders[3], torque);
         }
 
         if (frontWheelDrive && wheelColliders.Length >= 2)
         {
-            float tFL = torque;
-            float tFR = torque;
-
-            if (isReverse && movingForward && !recentCollision)
-            {
-                float extraBrake = Mathf.Clamp(rb.linearVelocity.magnitude * reverseBrakeAssist, 0f, maxBrakeTorque);
-                wheelColliders[0].brakeTorque = Mathf.Max(wheelColliders[0].brakeTorque, extraBrake);
-                wheelColliders[1].brakeTorque = Mathf.Max(wheelColliders[1].brakeTorque, extraBrake);
-
-                tFL *= 0.25f;
-                tFR *= 0.25f;
-
-                if (rb.linearVelocity.magnitude < reverseEngageSpeed)
-                {
-                    tFL = torque;
-                    tFR = torque;
-                }
-            }
-
-            wheelColliders[0].motorTorque = AdjustForTraction(wheelColliders[0], tFL);
-            wheelColliders[1].motorTorque = AdjustForTraction(wheelColliders[1], tFR);
+            wheelColliders[0].motorTorque = AdjustForTraction(wheelColliders[0], torque);
+            wheelColliders[1].motorTorque = AdjustForTraction(wheelColliders[1], torque);
         }
 
         if (!rearWheelDrive && !frontWheelDrive)
         {
             for (int i = 0; i < wheelColliders.Length; i++)
-            {
-                float t = torque;
-                bool movingF = Vector3.Dot(transform.forward, rb.linearVelocity) > 0.4f;
-                if (isReverse && movingF && !recentCollision)
-                {
-                    float extraBrake = Mathf.Clamp(rb.linearVelocity.magnitude * reverseBrakeAssist, 0f, maxBrakeTorque);
-                    wheelColliders[i].brakeTorque = Mathf.Max(wheelColliders[i].brakeTorque, extraBrake);
-                    t *= 0.25f;
-                    if (rb.linearVelocity.magnitude < reverseEngageSpeed) t = torque;
-                }
-
-                wheelColliders[i].motorTorque = AdjustForTraction(wheelColliders[i], t);
-            }
+                wheelColliders[i].motorTorque = AdjustForTraction(wheelColliders[i], torque);
         }
     }
 
     float AdjustForTraction(WheelCollider wheel, float inputTorque)
     {
-        // Respect temporary disable window
-        if (Time.time < tractionControlTempDisableUntil) return inputTorque;
-
         if (!enableTractionControl || wheel == null) return inputTorque;
 
         WheelHit hit;
         if (wheel.GetGroundHit(out hit))
         {
-            float sideways = Mathf.Abs(hit.sidewaysSlip);
-            float forward = Mathf.Abs(hit.forwardSlip);
-
-            float slipAmount = Mathf.Clamp01((sideways + forward * 0.5f) / (slipLimit * 2f));
-            float reduction = Mathf.Clamp01(tractionControlStrength * slipAmount);
-
-            return inputTorque * (1f - reduction);
+            if (hit.forwardSlip >= slipLimit)
+            {
+                return inputTorque * (1f - tractionControlStrength);
+            }
         }
         return inputTorque;
     }
+
+    // Braking that automatically brings the car to stop when joystick released
+    void ApplyBrakesAutoStop(float motorInput)
+    {
+        bool joystickActive = useVirtualJoystick ? joystickInput.magnitude >= joystickDeadzone : !Mathf.Approximately(motorInput, 0f);
+
+        float brake = 0f;
+
+        if (!joystickActive)
+        {
+            // if joystick released, apply strong brakes until near zero velocity
+            if (rb.linearVelocity.magnitude > 0.1f)
+                brake = autoBrakeForce;
+            else
+                brake = 0f;
+
+            // remove motor torque while braking to prevent creeping
+            for (int i = 0; i < wheelColliders.Length; i++)
+                wheelColliders[i].motorTorque = 0f;
+        }
+        else
+        {
+            // normal small auto-brake to stabilize when throttle not pressed but joystick horizontal only
+            if (Mathf.Approximately(motorInput, 0f) && rb.linearVelocity.magnitude > 1f)
+                brake = 50f;
+
+            // If player is pushing throttle opposite to travel direction, add stronger braking
+            if (motorInput * Vector3.Dot(transform.forward, rb.linearVelocity) < -0.1f)
+                brake = maxBrakeTorque * 0.5f;
+        }
+
+        for (int i = 0; i < wheelColliders.Length; i++)
+        {
+            wheelColliders[i].brakeTorque = brake;
+        }
+    }
+
+    void ApplyBrakes(bool handbrake, float motorInput) { /* kept for compatibility but not used */ }
 
     void DoAntiRoll()
     {
@@ -416,13 +252,9 @@ public class CarController : MonoBehaviour
         if (rb.linearVelocity.magnitude < 1f) return;
 
         Vector3 localVel = transform.InverseTransformDirection(rb.linearVelocity);
-        float slipAngle = Mathf.Atan2(localVel.x, localVel.z) * Mathf.Rad2Deg;
+        float angle = Mathf.Atan2(localVel.x, localVel.z) * Mathf.Rad2Deg;
 
-        float speedFactor = Mathf.Clamp01(rb.linearVelocity.magnitude / 20f);
-        float corrective = -slipAngle * stabilityStrength * speedFactor;
-        corrective = Mathf.Clamp(corrective, -150f, 150f);
-
-        rb.AddTorque(Vector3.up * corrective);
+        rb.AddTorque(Vector3.up * -angle * stabilityStrength);
     }
 
     void UpdateWheelMeshes()
@@ -449,55 +281,35 @@ public class CarController : MonoBehaviour
             if (wheelColliders[i].GetGroundHit(out hit))
             {
                 float sidewaysSlip = Mathf.Abs(hit.sidewaysSlip);
-                float combinedSlip = sidewaysSlip + Mathf.Abs(hit.forwardSlip) * 0.5f;
-                bool isSkidding = combinedSlip > skidThreshold;
+                bool isSkidding = sidewaysSlip > skidThreshold;
 
-                if (isSkidding && skidTrails.Length > i && skidTrails[i] != null)
-                {
-                    skidTrails[i].transform.position = hit.point + Vector3.up * 0.02f;
-                    if (!skidTrails[i].emitting)
-                    {
-                        skidTrails[i].Clear();
-                        skidTrails[i].emitting = true;
-                    }
-                }
-                else if (skidTrails.Length > i && skidTrails[i] != null)
-                {
-                    skidTrails[i].emitting = false;
-                }
-
-                if (tireSmoke.Length > i && tireSmoke[i] != null)
-                {
-                    var em = tireSmoke[i].emission;
-                    if (isSkidding)
-                    {
-                        em.enabled = true;
-                        float intensity = Mathf.Clamp01((combinedSlip - skidThreshold) / (skidThreshold * 2f));
-                        em.rateOverTime = new ParticleSystem.MinMaxCurve(smokeEmissionRate * intensity);
-                        if (!tireSmoke[i].isPlaying) tireSmoke[i].Play();
-                    }
-                    else
-                    {
-                        em.enabled = false;
-                        if (tireSmoke[i].isPlaying) tireSmoke[i].Stop();
-                    }
-                }
+                TriggerEffects(i, isSkidding);
             }
             else
             {
-                if (tireSmoke.Length > i && tireSmoke[i] != null)
-                {
-                    var em = tireSmoke[i].emission;
-                    em.enabled = false;
-                    if (tireSmoke[i].isPlaying) tireSmoke[i].Stop();
-                }
-                if (skidTrails.Length > i && skidTrails[i] != null)
-                    skidTrails[i].emitting = false;
+                TriggerEffects(i, false);
             }
         }
     }
 
+    void TriggerEffects(int index, bool state)
+    {
+        if (tireSmoke.Length > index && tireSmoke[index] != null)
+        {
+            if (state && !tireSmoke[index].isPlaying)
+                tireSmoke[index].Play();
+            else if (!state && tireSmoke[index].isPlaying)
+                tireSmoke[index].Stop();
+        }
+
+        if (skidTrails.Length > index && skidTrails[index] != null)
+        {
+            skidTrails[index].emitting = state;
+        }
+    }
+
     // Exposed API for your joystick UI to pass values into the controller
+    // Call from your UI joystick script: carController.SetJoystickInput(new Vector2(x, y));
     public void SetJoystickInput(Vector2 input)
     {
         joystickInput = input;
@@ -512,21 +324,21 @@ public class CarController : MonoBehaviour
         foreach (var wc in wheelColliders)
         {
             if (wc == null) continue;
-            wc.suspensionDistance = 0.18f; // slightly firmer for mobile responsiveness
+            wc.suspensionDistance = 0.2f;
             JointSpring spring = wc.suspensionSpring;
-            spring.spring = 36000f;
-            spring.damper = 5000f;
+            spring.spring = 35000f;
+            spring.damper = 4500f;
             wc.suspensionSpring = spring;
 
             WheelFrictionCurve forward = wc.forwardFriction;
-            forward.stiffness = 1.35f;
+            forward.stiffness = 1.2f;
             wc.forwardFriction = forward;
 
             WheelFrictionCurve sideways = wc.sidewaysFriction;
-            sideways.stiffness = 2.2f; // stronger grip for stability on touch
+            sideways.stiffness = 2.0f; // stronger grip for stability
             wc.sidewaysFriction = sideways;
         }
-        Debug.Log("WheelColliders auto-configured for responsive arcade racing (mobile). Tweak for fine feel.");
+        Debug.Log("WheelColliders auto-configured for arcade racing. Tweak for fine feel.");
     }
     #endif
 }
