@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.UI; // required for UI Text / Image
 
 [RequireComponent(typeof(Rigidbody))]
 public class ArcadeCarController : MonoBehaviour
@@ -13,7 +14,7 @@ public class ArcadeCarController : MonoBehaviour
     [Header("Torque / Speed")]
     public float motorTorqueForward = 900f;
     public float motorTorqueReverse = 1600f;
-    public float maxSpeed = 22f;         // m/s
+    public float maxSpeed = 22f;         // m/s - this is the speed mapped to the end of the dial
     public float maxReverseSpeed = 10f;  // m/s
 
     [Header("Braking")]
@@ -25,13 +26,9 @@ public class ArcadeCarController : MonoBehaviour
     [Range(0f,1f)] public float steerHelper = 0.6f;
 
     [Header("Skid Detection")]
-    [Tooltip("Sideways slip above this -> considered skidding")]
     public float skidSlipThreshold = 0.20f;
-    [Tooltip("Minimum wheel load (force) to consider grounded")]
     public float minHitForce = 5f;
-    [Tooltip("Keep FX on for this long after skid drops (to avoid flicker)")]
     public float skidHoldTime = 0.12f;
-    [Tooltip("How fast particle emission moves to/from target (units/sec)")]
     public float emissionFadeSpeed = 200f;
 
     [Header("Effects - Rear (0 = RL, 1 = RR)")]
@@ -44,14 +41,27 @@ public class ArcadeCarController : MonoBehaviour
     public float downforce = 120f;
 
     [Header("Steer-start (nudges car when stationary + steering)")]
-    [Tooltip("Enable small forward nudge when stationary and steering input exists")]
     public bool enableSteerStart = true;
-    [Tooltip("How strong the nudge is (0..1 multiplier of forward torque)")]
     [Range(0f,1f)] public float steerStartThrottle = 0.45f;
-    [Tooltip("If speed is below this, steer-start can trigger (m/s)")]
     public float steerStartMaxSpeed = 0.6f;
-    [Tooltip("Minimum steering input magnitude to trigger steer-start (0..1)")]
     [Range(0f,1f)] public float steerStartMinInput = 0.15f;
+
+    [Header("Speed UI - Digital")]
+    public Text speedText;
+    public bool showOneDecimal = false;
+    public float speedConversion = 3.6f; // m/s -> km/h
+
+    [Header("Speed UI - Needle & Radial Fill")]
+    [Tooltip("RectTransform of the needle sprite (pivot should be at the base of the needle)")]
+    public RectTransform needleTransform;
+    [Tooltip("Image set to 'Filled' (radial) - this will fill with speed.")]
+    public Image speedFillImage;
+    [Tooltip("Minimum rotation angle for needle (e.g. -120)")]
+    public float needleMinAngle = -120f;
+    [Tooltip("Maximum rotation angle for needle (e.g. 120)")]
+    public float needleMaxAngle = 120f;
+    [Tooltip("How quickly the needle & fill smoothly move (higher = faster)")]
+    public float needleSmoothSpeed = 6f;
 
     // runtime
     Rigidbody rb;
@@ -63,6 +73,10 @@ public class ArcadeCarController : MonoBehaviour
     private float[] skidTimers = new float[2];
     private float[] currentSmokeRate = new float[2];
     private float[] targetSmokeRate = new float[2];
+
+    // smoothing state for UI
+    private float uiNeedleAngleCurrent = 0f;
+    private float uiFillCurrent = 0f;
 
     void Start()
     {
@@ -79,10 +93,7 @@ public class ArcadeCarController : MonoBehaviour
             targetSmokeRate[i] = 0f;
 
             if (rearTrails != null && rearTrails.Length > i && rearTrails[i] != null)
-            {
                 rearTrails[i].emitting = false;
-                // do not Clear() so trails fade naturally
-            }
 
             if (rearSmokes != null && rearSmokes.Length > i && rearSmokes[i] != null)
             {
@@ -91,6 +102,16 @@ public class ArcadeCarController : MonoBehaviour
                 rearSmokes[i].Stop(false, ParticleSystemStopBehavior.StopEmitting);
             }
         }
+
+        // init UI smoother values
+        uiNeedleAngleCurrent = needleMinAngle;
+        uiFillCurrent = 0f;
+
+        // validate speedFillImage: if set, ensure Image.type = Filled (we will still work if user forgot, but note in logs)
+#if UNITY_EDITOR
+        if (speedFillImage != null && speedFillImage.type != Image.Type.Filled)
+            Debug.LogWarning("ArcadeCarController: speedFillImage should be Image.Type = Filled (radial) for proper behavior.");
+#endif
     }
 
     void Update()
@@ -98,6 +119,9 @@ public class ArcadeCarController : MonoBehaviour
         inputSteer = Input.GetAxis("Horizontal");
         inputThrottle = Input.GetAxis("Vertical");
         UpdateWheelMeshes();
+
+        // update digital speed text here for smooth display
+        UpdateSpeedUI();
     }
 
     void FixedUpdate()
@@ -107,12 +131,11 @@ public class ArcadeCarController : MonoBehaviour
         ApplySteer();
         ApplyMotorAndBrakes();
 
-        // downforce
         rb.AddForce(-transform.up * downforce * rb.linearVelocity.magnitude);
 
         SteerHelper();
-        UpdateSkidEffects();            // sets targetSmokeRate & trail emitting flags
-        UpdateSmokeEmissionSmoothing(); // smooth emission per-wheel
+        UpdateSkidEffects();
+        UpdateSmokeEmissionSmoothing();
     }
 
     void ApplySteer()
@@ -134,17 +157,14 @@ public class ArcadeCarController : MonoBehaviour
         float velForward = Vector3.Dot(rb.linearVelocity, transform.forward);
         float throttle = inputThrottle; // -1..1
 
-        // steer-start check (only when enabled, no throttle, low speed, steering input present)
         bool steerStartActive = enableSteerStart
                                 && Mathf.Abs(throttle) < 0.01f
                                 && rb.linearVelocity.magnitude < steerStartMaxSpeed
                                 && Mathf.Abs(inputSteer) >= steerStartMinInput;
 
-        // calculate motor torque based on forward/reverse or steer-start
         float appliedMotor = 0f;
         if (steerStartActive)
         {
-            // nudge forward with magnitude based on steering input
             appliedMotor = motorTorqueForward * steerStartThrottle * Mathf.Clamp01(Mathf.Abs(inputSteer));
         }
         else
@@ -160,7 +180,6 @@ public class ArcadeCarController : MonoBehaviour
             }
         }
 
-        // apply motor depending on drive type
         switch (driveType)
         {
             case DriveType.RearWheelDrive:
@@ -180,7 +199,6 @@ public class ArcadeCarController : MonoBehaviour
                 break;
         }
 
-        // braking: player braking if input opposite to movement
         bool playerBraking = false;
         if (!steerStartActive && Mathf.Abs(throttle) > 0.01f)
         {
@@ -190,7 +208,6 @@ public class ArcadeCarController : MonoBehaviour
 
         float appliedBrake = playerBraking ? brakeTorque : 0f;
 
-        // auto-brake when no input (scaled by speed) — don't apply if steer-start is active (we want to let nudge move)
         if (!steerStartActive && Mathf.Abs(throttle) < 0.01f)
         {
             float speedFactorBrake = Mathf.Clamp01(rb.linearVelocity.magnitude / (maxSpeed * 0.5f));
@@ -212,7 +229,6 @@ public class ArcadeCarController : MonoBehaviour
         }
     }
 
-    // attempt to get accurate world contact point for a wheel:
     Vector3 GetWheelContactPoint(int wheelIndex)
     {
         if (wheelColliders == null || wheelIndex < 0 || wheelIndex >= wheelColliders.Length)
@@ -249,27 +265,23 @@ public class ArcadeCarController : MonoBehaviour
         bool rawRL = RawWheelSkid(2, out WheelHit hitRL);
         bool rawRR = RawWheelSkid(3, out WheelHit hitRR);
 
-        // update skid hold timers
         skidTimers[0] = rawRL ? skidHoldTime : Mathf.Max(0f, skidTimers[0] - Time.fixedDeltaTime);
         skidTimers[1] = rawRR ? skidHoldTime : Mathf.Max(0f, skidTimers[1] - Time.fixedDeltaTime);
 
         bool skidActiveRL = skidTimers[0] > 0f;
         bool skidActiveRR = skidTimers[1] > 0f;
 
-        // Position FX at contact points each physics step so both sides match wheel movement
         for (int i = 0; i < 2; i++)
         {
-            int wheelIndex = 2 + i; // map 0->2 (RL), 1->3 (RR)
+            int wheelIndex = 2 + i;
             Vector3 contact = GetWheelContactPoint(wheelIndex);
 
-            // trails
             if (rearTrails != null && i < rearTrails.Length && rearTrails[i] != null)
             {
                 rearTrails[i].transform.position = contact;
                 rearTrails[i].emitting = (i == 0) ? skidActiveRL : skidActiveRR;
             }
 
-            // smoke
             if (rearSmokes != null && i < rearSmokes.Length && rearSmokes[i] != null)
             {
                 rearSmokes[i].transform.position = contact;
@@ -309,6 +321,45 @@ public class ArcadeCarController : MonoBehaviour
             wheelColliders[i].GetWorldPose(out pos, out rot);
             wheelMeshes[i].position = pos;
             wheelMeshes[i].rotation = rot;
+        }
+    }
+
+    // UI update (called from Update)
+    void UpdateSpeedUI()
+    {
+        if (rb == null) return;
+
+        // use magnitude so speed always positive; clamp to maxSpeed for dial mapping
+        float vehicleSpeed = Mathf.Clamp01(rb.linearVelocity.magnitude / Mathf.Max(0.0001f, maxSpeed));
+        float displaySpeed = rb.linearVelocity.magnitude * speedConversion;
+
+        // digital text
+        if (speedText != null)
+        {
+            if (showOneDecimal) speedText.text = $"{displaySpeed:F1}";
+            else speedText.text = $"{Mathf.RoundToInt(displaySpeed)}";
+        }
+
+        // needle & fill mapping
+        // compute target angle and fill amount from normalized vehicleSpeed (0..1)
+        float targetAngle = Mathf.Lerp(needleMinAngle, needleMaxAngle, vehicleSpeed);
+        float targetFill = Mathf.Clamp01(vehicleSpeed);
+
+        // smooth values
+        uiNeedleAngleCurrent = Mathf.LerpAngle(uiNeedleAngleCurrent, targetAngle, Mathf.Clamp01(needleSmoothSpeed * Time.deltaTime));
+        uiFillCurrent = Mathf.MoveTowards(uiFillCurrent, targetFill, needleSmoothSpeed * Time.deltaTime);
+
+        // apply rotation to needle (around Z)
+        if (needleTransform != null)
+        {
+            needleTransform.localEulerAngles = new Vector3(0f, 0f, uiNeedleAngleCurrent);
+        }
+
+        // apply fill to image (Image.type must be Filled)
+        if (speedFillImage != null)
+        {
+            // prefer setting fillAmount only; user must set image type = Filled in inspector
+            speedFillImage.fillAmount = uiFillCurrent;
         }
     }
 

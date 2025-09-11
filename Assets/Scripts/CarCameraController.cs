@@ -164,4 +164,18 @@ public class CarCameraController : MonoBehaviour
 
         lastTargetPos = target.position;
     }
+
+    public void ToggleCameraMode()
+    {
+        if (mode == CameraMode.Chase)
+            mode = CameraMode.Hood;
+        else
+            mode = CameraMode.Chase;
+    }
+
+    // Optional: If you want to set a specific mode from the button
+    public void SetCameraMode(int modeIndex)
+    {
+        mode = (CameraMode)modeIndex;
+    }
 }
