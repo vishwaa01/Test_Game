@@ -9,9 +9,9 @@ namespace SimpleInputNamespace
 		void ResetValue();
 	}
 
+    [System.Serializable]
 	public abstract class BaseInput<K, V> : IBaseInput
 	{
-#pragma warning disable 0649
 		[SerializeField]
 		private K m_key;
 		public K Key
@@ -31,7 +31,6 @@ namespace SimpleInputNamespace
 				}
 			}
 		}
-#pragma warning restore 0649
 
 		public V value;
 		private bool isTracking = false;
